@@ -1,0 +1,47 @@
+{
+	"name": "@mariozechner/pi-missions",
+	"version": "0.1.0",
+	"description": "Your engineering org: generic long-running coding agents that plan themselves, work any repo, and report at standups with glanceable artifacts",
+	"type": "module",
+	"bin": {
+		"missions": "dist/cli.js"
+	},
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"files": [
+		"dist",
+		"CHANGELOG.md"
+	],
+	"scripts": {
+		"clean": "shx rm -rf dist",
+		"build": "tsgo -p tsconfig.build.json && shx chmod +x dist/cli.js",
+		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
+		"prepublishOnly": "npm run clean && npm run build"
+	},
+	"dependencies": {
+		"@mariozechner/pi-agent-core": "^0.68.0",
+		"@mariozechner/pi-ai": "^0.68.0",
+		"@mariozechner/pi-coding-agent": "^0.68.0",
+		"@sinclair/typebox": "^0.34.0",
+		"chalk": "^5.6.2"
+	},
+	"devDependencies": {
+		"@types/node": "^24.3.0",
+		"shx": "^0.4.0",
+		"typescript": "^5.7.3",
+		"@typescript/native-preview": "7.0.0-dev.20260120.1"
+	},
+	"keywords": [
+		"llm",
+		"multi-agent",
+		"coding-agent",
+		"orchestration",
+		"missions",
+		"ai"
+	],
+	"author": "Elijah",
+	"license": "MIT",
+	"engines": {
+		"node": ">=20.0.0"
+	}
+}
