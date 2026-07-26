@@ -7,6 +7,7 @@ import chalk from "chalk";
 import { runClient } from "./client.js";
 import { cmuxOpenBrowser, cmuxOpenDiff, hasCmuxPassword, insideCmux } from "./cmux.js";
 import { runControl } from "./control.js";
+import { missionDebrief } from "./diagram-text.js";
 import { runDaemon } from "./daemon.js";
 import { runMission } from "./mission.js";
 import { autoRouting } from "./models.js";
@@ -139,13 +140,8 @@ async function runOne(config: MissionConfig, open: boolean): Promise<void> {
 		if (e.type === "status") process.stdout.write(`${chalk.cyan("▶")} ${chalk.bold(e.status)}\n`);
 		else process.stdout.write(`  ${chalk.dim(e.message)}\n`);
 	});
-	const ok = state.status === "succeeded";
-	process.stdout.write(`\n${ok ? chalk.green("✓") : chalk.red("✗")} ${state.status} — $${state.costUsd.toFixed(3)}\n`);
-	if (state.scoreCard) {
-		process.stdout.write(
-			`  ${state.scoreCard.assertionsPassed}/${state.scoreCard.assertionsTotal} assertions · ${state.scoreCard.bugs.length} bug(s) flagged\n`,
-		);
-	}
+	// The debrief IS the summary — same facts as report.html, for when there is no browser.
+	process.stdout.write(`${missionDebrief(state, process.stdout.columns ?? 92).join("\n")}\n`);
 	if (state.reportPath) {
 		process.stdout.write(`  ${chalk.bold("report:")} ${state.reportPath}\n`);
 		presentReview(state.reportPath, config.targetCwd, state.baseSha, open);
@@ -200,9 +196,9 @@ async function main(): Promise<void> {
 		const store = StateStore.load(f.out);
 		if (!store) throw new Error(`No state.json in ${f.out}`);
 		const s = store.state;
-		process.stdout.write(`${chalk.bold(s.goal)}\n${s.id} · ${s.status} · $${s.costUsd.toFixed(3)}\n`);
-		if (s.scoreCard) process.stdout.write(`${s.scoreCard.assertionsPassed}/${s.scoreCard.assertionsTotal} assertions · ${s.scoreCard.bugs.length} bugs\n`);
-		if (s.reportPath) process.stdout.write(`report: ${s.reportPath}\n`);
+		process.stdout.write(`${missionDebrief(s, process.stdout.columns ?? 92).join("\n")}\n`);
+		process.stdout.write(chalk.dim(`  ${s.id} · ${s.status}\n`));
+		if (s.reportPath) process.stdout.write(chalk.dim(`  report: ${s.reportPath}\n\n`));
 		return;
 	}
 
