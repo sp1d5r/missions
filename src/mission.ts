@@ -1,4 +1,7 @@
 import { join } from "node:path";
+import { applyEnvOverrides, bootstrapWorktree } from "./bootstrap.js";
+import { provisionDbBranch } from "./db-branch.js";
+import { resolveMissionEnv } from "./env.js";
 import { addWorktree, commitAll, diffAgainst, ensureBranch, headSha, isGitRepo } from "./git.js";
 import { planMission, scopeCorrections } from "./orchestrator.js";
 import { writeActive, repoName } from "./registry.js";
@@ -21,6 +24,10 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 	const target = getTarget(config.target);
 	const intent = `GOAL: ${config.goal}\n\nRFC: ${config.rfc}`;
 	const maxMilestones = Math.max(1, config.maxMilestones ?? 3);
+	/** Set when a branched database was provisioned for this mission's schema work. */
+	let dbTeardown: (() => Promise<void>) | undefined;
+	/** Set when the plan involves schema work we could NOT isolate. Workers must be told. */
+	let schemaWarning: string | undefined;
 
 	let lastActivity = "";
 	const publish = () => {
@@ -65,26 +72,83 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 		const branch = useWorktree ? `missions/${store.state.id}` : config.branch;
 		store.state.branch = branch;
 
+		const spec = target.bootstrapSpec(config.targetCwd);
 		let workCwd = config.targetCwd;
+		let sourceRoots: string[] = [];
+		// Paths the harness put here. Kept out of every commit — see commitAll.
+		let gitExcludes: string[] = [];
 		if (useWorktree) {
 			workCwd = join(config.targetCwd, ".missions", "worktrees", store.state.id);
 			addWorktree(config.targetCwd, workCwd, branch, baseSha);
 			store.state.worktreePath = workCwd;
 			emit(`worktree ${branch} @ ${baseSha.slice(0, 8)} → ${workCwd}`);
+
+			// `git worktree add` carries tracked files and nothing else. Everything gitignored that
+			// the tree needs to actually RUN — env files, venvs, node_modules — is placed here.
+			const boot = bootstrapWorktree({ targetCwd: config.targetCwd, workCwd, spec });
+			sourceRoots = boot.sourceRoots;
+			gitExcludes = boot.gitExcludes;
+			for (const note of boot.notes) emit(`  bootstrap: ${note}`);
 		} else {
+			// Working in the main checkout: env and deps are already there, so only the source
+			// roots matter. Nothing was placed by us, so nothing needs excluding from commits.
 			ensureBranch(config.targetCwd, branch);
+			sourceRoots = bootstrapWorktree({ targetCwd: config.targetCwd, workCwd, spec }).sourceRoots;
 			emit(`branch ${branch} @ ${baseSha.slice(0, 8)} in ${config.targetCwd}`);
 		}
 		store.save();
 
+		// The env every worker command and every assertion check runs under. Explicit, so that
+		// which tree a command reads is a decision here rather than an accident of the daemon's
+		// ambient environment or a venv's baked-in absolute paths.
+		let missionEnv = resolveMissionEnv({
+			targetCwd: config.targetCwd,
+			workCwd,
+			missionId: store.state.id,
+			sourceRoots,
+		});
+
 		// 1. Plan — the validation contract is written here, before any code exists.
 		setStatus("planning");
 		emit("orchestrator planning…");
-		const { plan, costUsd: planCost } = await planMission(config, target.recon(config.targetCwd));
+		const { plan, costUsd: planCost } = await planMission(config, target.recon(workCwd), {
+			workCwd,
+			envDoctrine: target.envDoctrine,
+		});
 		store.state.plan = plan;
 		store.state.costUsd += planCost;
 		store.save();
 		emit(`plan: ${plan.features.length} feature(s), ${plan.contract.assertions.length} assertion(s) — $${planCost.toFixed(3)}`);
+
+		// Schema work is the one action a parallel worker can take that breaks every other tree
+		// at once, so it is the only thing we isolate. Everything else runs against the live
+		// environment on purpose. Decided here because only the plan knows if DDL is coming.
+		const dbOutcome = await provisionDbBranch({ plan, missionId: store.state.id });
+		if (dbOutcome.status === "branched") {
+			// Written into the worktree's .env, not just injected: dotenv loads with override=True,
+			// so a file value would otherwise beat anything we pass down.
+			applyEnvOverrides({
+				targetCwd: config.targetCwd,
+				workCwd,
+				envFile: ".env",
+				missionId: store.state.id,
+				overrides: dbOutcome.branch.overrides,
+			});
+			missionEnv = resolveMissionEnv({
+				targetCwd: config.targetCwd,
+				workCwd,
+				missionId: store.state.id,
+				sourceRoots,
+				overrides: dbOutcome.branch.overrides,
+			});
+			dbTeardown = dbOutcome.branch.teardown;
+			emit(`database: ${dbOutcome.branch.note}`);
+		} else if (dbOutcome.status === "unavailable") {
+			schemaWarning = dbOutcome.note;
+			emit(`⚠ database: ${dbOutcome.note}`);
+		} else {
+			emit(`database: ${dbOutcome.note}`);
+		}
 
 		// 2. Milestones. Each is: work the queue serially → validate the WHOLE contract →
 		//    orchestrator rules the boundary → corrections become the next queue.
@@ -122,13 +186,21 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 					cwd: workCwd,
 					model: config.routing.worker,
 					budgetUsd: Math.min(remaining, config.budgetUsd * 0.6),
+					env: missionEnv,
+					envDoctrine: [target.envDoctrine, schemaWarning && `HARNESS WARNING: ${schemaWarning}`]
+						.filter(Boolean)
+						.join("\n"),
 					onProgress: (e) => {
 						if (e.type === "tool") onEvent?.({ type: "log", message: `  ${feature.id} → ${e.toolName}` });
 					},
 				});
 				store.state.costUsd += result.costUsd;
 
-				const sha = commitAll(workCwd, `feat(${feature.id}): ${feature.title}\n\nvia pi-missions ${store.state.id}`);
+				const sha = commitAll(
+					workCwd,
+					`feat(${feature.id}): ${feature.title}\n\nvia pi-missions ${store.state.id}`,
+					gitExcludes,
+				);
 				if (sha) {
 					store.state.commits.push({ featureId: feature.id, sha, message: feature.title });
 					result.handoff.commitSha = sha;
@@ -159,6 +231,10 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 				diff,
 				intent,
 				extraCheckCommand: config.checkCommand ?? target.defaultCheckCommand(workCwd),
+				env: missionEnv,
+				// Assertions that reach back into the main checkout are refused rather than run,
+				// so a mission can no longer score itself against a tree it never touched.
+				foreignRoot: config.targetCwd,
 				onProgress: (msg) => emit(`  validator: ${msg}`),
 			});
 			store.state.scoreCard = scoreCard;
@@ -304,6 +380,11 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 			store.save();
 		} catch {
 			/* ignore secondary failure */
+		}
+	} finally {
+		if (dbTeardown) {
+			await dbTeardown();
+			emit("database: mission branch removed");
 		}
 	}
 

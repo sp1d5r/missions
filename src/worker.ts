@@ -14,6 +14,12 @@ Rules:
 - Do NOT run git or commit — the harness handles commits.
 - Run commands PLAINLY. Never append \`; echo $?\`, \`|| true\`, \`&& echo ok\` or similar. The harness records
   the real exit code of every command you run; masking it destroys the record the next agent depends on.
+- You are in an ISOLATED WORKTREE and other workers are in their own worktrees in parallel. Every path you
+  touch must be relative to your working directory. Never cd to an absolute path outside it and never edit or
+  test files in another checkout — you would be changing, or measuring, someone else's tree.
+- Your environment is already prepared: env files, dependencies and import paths are set up for this tree.
+  If a command cannot find a module or a credential, that is a bug worth reporting as an issue, not something
+  to fix by installing packages or writing env files.
 
 HANDOFF — REQUIRED. Your final message must end with a fenced block tagged "handoff" containing ONLY JSON:
 
@@ -59,11 +65,19 @@ export interface RunWorkerOptions {
 	cwd: string;
 	model: ModelSpec;
 	budgetUsd: number;
+	/**
+	 * The mission env every bash command runs under. Without this, commands inherit the
+	 * daemon's ambient environment — whatever shell happened to start it — and Python
+	 * resolves imports out of the main checkout via the venv's baked-in .pth entries.
+	 */
+	env?: NodeJS.ProcessEnv;
+	/** Ground truth about the repo's environments, handed to the worker verbatim. */
+	envDoctrine?: string;
 	onProgress?: (e: { type: "tool"; toolName: string } | { type: "cost"; costUsd: number }) => void;
 }
 
 export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult> {
-	const { feature, assertions, milestone, cwd, model: spec, budgetUsd, onProgress } = options;
+	const { feature, assertions, milestone, cwd, model: spec, budgetUsd, env, envDoctrine, onProgress } = options;
 
 	const model = getModel(spec.provider as KnownProvider, spec.modelId as never);
 	if (!model) throw new Error(`Worker model not found: ${spec.provider}/${spec.modelId}`);
@@ -73,7 +87,9 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult
 			systemPrompt: SYSTEM_PROMPT,
 			model,
 			thinkingLevel: "off",
-			tools: createCodingTools(cwd),
+			// The spawn hook is the seam that makes the environment explicit rather than ambient:
+			// every bash command the worker runs gets the mission's env, not the daemon's.
+			tools: createCodingTools(cwd, env ? { bash: { spawnHook: (ctx) => ({ ...ctx, env }) } } : undefined),
 		},
 		getApiKey: (provider) => getEnvApiKey(provider),
 	});
@@ -126,8 +142,14 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult
 		? `\nThis is CORRECTIVE work. It exists to resolve:\n${feature.addresses.map((a) => `- ${a}`).join("\n")}\n`
 		: "";
 
+	const doctrineText = envDoctrine ? `\nENVIRONMENT — read this before running anything:\n${envDoctrine}\n` : "";
+
 	const task = `Implement this feature.
 
+YOUR WORKING DIRECTORY: ${cwd}
+Everything you read, edit and run lives under that path. It is a git worktree of the target repo,
+yours alone for this mission.
+${doctrineText}
 FEATURE: ${feature.title}
 ${feature.description}
 ${addressesText}${procedureText}

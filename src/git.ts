@@ -38,10 +38,23 @@ export function hasUncommittedChanges(cwd: string): boolean {
 	return git(cwd, ["status", "--porcelain"]).trim().length > 0;
 }
 
-/** Stage everything and commit. Returns the new sha, or null if there was nothing to commit. */
-export function commitAll(cwd: string, message: string): string | null {
+/**
+ * Stage everything and commit. Returns the new sha, or null if there was nothing to commit.
+ *
+ * `excludePaths` are the paths the harness itself placed in the worktree (linked dependency
+ * dirs, copied env files). They must never be staged, and a repo's own .gitignore cannot be
+ * relied on to hide them: directory-only patterns like `node_modules/` do NOT match a symlink,
+ * so a bootstrapped worktree shows them as untracked and `git add -A` would happily commit
+ * symlinks pointing back at the main checkout.
+ */
+export function commitAll(cwd: string, message: string, excludePaths: string[] = []): string | null {
 	git(cwd, ["add", "-A"]);
-	if (!hasUncommittedChanges(cwd)) return null;
+	// Unstage rather than exclude via pathspec: `:(exclude)` on an already-ignored path makes
+	// `git add` fail outright, whereas `reset` is quiet whether the path was staged or not.
+	if (excludePaths.length) gitSafe(cwd, ["reset", "-q", "--", ...excludePaths]);
+	// Ask whether anything is STAGED rather than whether the tree is dirty — the excluded
+	// paths stay untracked on purpose, so a dirty tree is the normal state here.
+	if (gitSafe(cwd, ["diff", "--cached", "--quiet"]).ok) return null;
 	git(cwd, ["commit", "-m", message, "--no-verify"]);
 	return headSha(cwd);
 }

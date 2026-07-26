@@ -12,6 +12,10 @@ Principles:
   - "bash-command": a shell command in the repo whose exit code proves the assertion (tests, typecheck, a grep).
   - "code-review": a focused thing an adversarial reviewer must confirm by reading the diff.
   - "behavioral": only when a concrete end-to-end scenario clearly applies (the target adapter runs it).
+- Every "bash-command" assertion runs with its working directory set to the MISSION WORKTREE — an isolated
+  checkout that is not the path the repo normally lives at. So: use RELATIVE paths only, and never \`cd\` to an
+  absolute path. A command that reaches outside the worktree is refused by the harness and the assertion fails,
+  because it would prove something about a different checkout than the one the work happened in.
 - Every feature maps to one or more assertion ids; every assertion is covered by at least one feature.
 - "procedures" are per-feature working rules for the worker (what to run, what to leave alone, what to check
   before finishing). The worker reports whether it followed them. Use them where a feature has a sharp edge.
@@ -35,14 +39,27 @@ Output ONLY a JSON object, no prose, in exactly this shape:
   }
 }`;
 
-export async function planMission(config: MissionConfig, repoSummary: string): Promise<{ plan: Plan; costUsd: number }> {
-	const userPrompt = `TARGET REPO: ${config.targetCwd}
+export interface PlanContext {
+	/** Where workers and assertions actually run. Planning against targetCwd is what produced
+	 *  assertions that cd'd into the main checkout and validated the wrong tree. */
+	workCwd: string;
+	/** Repo environment ground truth, so the plan does not casually propose spending money or DDL. */
+	envDoctrine?: string;
+}
+
+export async function planMission(
+	config: MissionConfig,
+	repoSummary: string,
+	context: PlanContext,
+): Promise<{ plan: Plan; costUsd: number }> {
+	const doctrineText = context.envDoctrine ? `\nENVIRONMENT GROUND TRUTH:\n${context.envDoctrine}\n` : "";
+	const userPrompt = `MISSION WORKTREE (workers and assertion commands run here): ${context.workCwd}
 GOAL:
 ${config.goal}
 
 ENGINEER'S RFC:
 ${config.rfc || "(none provided)"}
-
+${doctrineText}
 REPO RECON (top-level structure + signals):
 ${repoSummary}
 
