@@ -18,6 +18,13 @@ export interface ActiveRecord {
 	worktreePath?: string;
 	costUsd: number;
 	done: boolean;
+	/** Milestones completed so far, and the ceiling — "2/3" on the board. */
+	milestone?: number;
+	maxMilestones?: number;
+	/** Why the mission stopped (passed / stalled / budget-exhausted / max-milestones). */
+	verdict?: string;
+	/** "clean" = contract satisfied and nothing outstanding; "needs-review" = wants a human. */
+	outcome?: string;
 	/** Set once the human has actioned it (merged/retried/dismissed) — drops it from the "needs you" queue. */
 	cleared?: boolean;
 }

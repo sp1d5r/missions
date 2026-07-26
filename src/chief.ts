@@ -40,6 +40,7 @@ function configFor(targetCwd: string, goal: string, rfc: string, maxFeatures: nu
 		outDir: resolve(targetCwd, ".missions", "runs", runId),
 		routing: autoRouting(),
 		maxFeatures,
+		maxMilestones: 3,
 		target: /nadine|naomi/i.test(targetCwd) ? "nadine" : "generic",
 		useWorktree: true,
 	};

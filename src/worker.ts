@@ -1,7 +1,8 @@
 import { Agent, type AgentEvent, type AgentMessage } from "@mariozechner/pi-agent-core";
 import { type AssistantMessage, getEnvApiKey, getModel, type KnownProvider } from "@mariozechner/pi-ai";
 import { createCodingTools } from "@mariozechner/pi-coding-agent";
-import type { Assertion, Feature, ModelSpec } from "./types.js";
+import { parseJson } from "./llm.js";
+import type { Assertion, CommandRecord, Feature, Handoff, HandoffIssue, ModelSpec } from "./types.js";
 
 const SYSTEM_PROMPT = `You are a CODING WORKER in an autonomous engineering org.
 You have a clean context and full read/edit/write/bash tools scoped to the target repository.
@@ -11,10 +12,39 @@ Rules:
 - Read the relevant files before editing. Make focused, minimal changes that match the surrounding code.
 - Run any quick, cheap checks you can (typecheck, a targeted test) to sanity-check your change.
 - Do NOT run git or commit — the harness handles commits.
-- When finished, end your final message with a tight 3-5 line summary: what you changed, which files, and why it satisfies the validation assertions.`;
+- Run commands PLAINLY. Never append \`; echo $?\`, \`|| true\`, \`&& echo ok\` or similar. The harness records
+  the real exit code of every command you run; masking it destroys the record the next agent depends on.
+
+HANDOFF — REQUIRED. Your final message must end with a fenced block tagged "handoff" containing ONLY JSON:
+
+\`\`\`handoff
+{
+  "completed": "what you actually changed, 1-3 sentences, naming the files",
+  "leftUndone": ["parts of THIS feature's spec you did not do, each with the reason"],
+  "issues": [{ "summary": "<=10 words", "detail": "what you found and what decision it needs" }],
+  "proceduresFollowed": true,
+  "procedureNotes": "only if you deviated: which procedure, and why",
+  "assertionsClaimed": ["a1"],
+  "confidence": "high"
+}
+\`\`\`
+
+How to fill it in:
+- "leftUndone" is for YOUR unfinished work on this feature. Be honest — a worker that hides an
+  unfinished edge case costs the org an entire milestone. An empty list is a strong claim; earn it.
+- "issues" is for things OUTSIDE this feature you discovered: pre-existing bugs, a wrong assumption
+  in the spec, a missing dependency, a test that was already failing. Each issue you report gets
+  triaged by the orchestrator. Silence here is how a mission drifts.
+- "assertionsClaimed": list an assertion id ONLY if you believe a hostile reviewer reading the diff
+  would agree it holds. Independent validators check every claim — overclaiming is caught and costs
+  a correction round.
+- "confidence": "low" is a legitimate and useful answer. Say it when you are guessing.
+- Do NOT list the commands you ran — the harness records those from your tool calls automatically.`;
 
 export interface WorkerResult {
+	/** Human-readable prose (handoff block stripped). */
 	summary: string;
+	handoff: Handoff;
 	costUsd: number;
 	stopReason: string;
 	aborted: boolean;
@@ -25,6 +55,7 @@ export interface WorkerResult {
 export interface RunWorkerOptions {
 	feature: Feature;
 	assertions: Assertion[];
+	milestone: number;
 	cwd: string;
 	model: ModelSpec;
 	budgetUsd: number;
@@ -32,7 +63,7 @@ export interface RunWorkerOptions {
 }
 
 export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult> {
-	const { feature, assertions, cwd, model: spec, budgetUsd, onProgress } = options;
+	const { feature, assertions, milestone, cwd, model: spec, budgetUsd, onProgress } = options;
 
 	const model = getModel(spec.provider as KnownProvider, spec.modelId as never);
 	if (!model) throw new Error(`Worker model not found: ${spec.provider}/${spec.modelId}`);
@@ -52,6 +83,10 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult
 	let stopReason = "stop";
 	let errorMessage: string | undefined;
 
+	// Deterministic command log. We never ask the model what it ran — we watch.
+	const commands: CommandRecord[] = [];
+	const inFlight = new Map<string, string>();
+
 	agent.subscribe((event: AgentEvent) => {
 		if (event.type === "message_end" && event.message.role === "assistant") {
 			const msg = event.message as AssistantMessage;
@@ -67,6 +102,15 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult
 			}
 		} else if (event.type === "tool_execution_start") {
 			onProgress?.({ type: "tool", toolName: event.toolName });
+			if (event.toolName === "bash") {
+				const cmd = (event.args as { command?: string } | undefined)?.command;
+				if (cmd) inFlight.set(event.toolCallId, cmd);
+			}
+		} else if (event.type === "tool_execution_end") {
+			const cmd = inFlight.get(event.toolCallId);
+			if (cmd === undefined) return;
+			inFlight.delete(event.toolCallId);
+			commands.push({ command: cmd, exitCode: exitCodeOf(event.result, event.isError) });
 		}
 	});
 
@@ -74,15 +118,23 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult
 		? assertions.map((a) => `- (${a.id}) ${a.statement}`).join("\n")
 		: "(no explicit assertions — use your judgement)";
 
+	const procedureText = feature.procedures?.length
+		? `\nPROCEDURES you must follow for this feature (report adherence in the handoff):\n${feature.procedures.map((p) => `- ${p}`).join("\n")}\n`
+		: "";
+
+	const addressesText = feature.addresses?.length
+		? `\nThis is CORRECTIVE work. It exists to resolve:\n${feature.addresses.map((a) => `- ${a}`).join("\n")}\n`
+		: "";
+
 	const task = `Implement this feature.
 
 FEATURE: ${feature.title}
 ${feature.description}
-
+${addressesText}${procedureText}
 VALIDATION ASSERTIONS this feature must satisfy:
 ${assertionText}
 
-Make the change now, then summarize.`;
+Make the change now, then emit your handoff block.`;
 
 	try {
 		await agent.prompt(task);
@@ -91,14 +143,99 @@ Make the change now, then summarize.`;
 	}
 	await agent.waitForIdle();
 
+	// Any command still in flight when we aborted: record it with an unknown exit code
+	// rather than dropping it. A killed command is exactly the kind of thing the next
+	// agent needs to know about.
+	for (const [, cmd] of inFlight) commands.push({ command: cmd, exitCode: null });
+
+	const finalText = extractFinal(agent.state.messages);
+	const { prose, handoff } = parseHandoff(finalText);
+
 	return {
-		summary: extractFinal(agent.state.messages),
+		summary: prose,
+		handoff: {
+			featureId: feature.id,
+			milestone,
+			completed: handoff?.completed?.trim() || prose || "(worker produced no summary)",
+			leftUndone: stringList(handoff?.leftUndone),
+			commands,
+			issues: issueList(handoff?.issues),
+			proceduresFollowed: handoff?.proceduresFollowed !== false,
+			procedureNotes: typeof handoff?.procedureNotes === "string" ? handoff.procedureNotes : undefined,
+			assertionsClaimed: stringList(handoff?.assertionsClaimed).filter((id) => assertions.some((a) => a.id === id)),
+			confidence: confidenceOf(handoff?.confidence),
+			degraded: handoff === null,
+			stopReason,
+			aborted,
+			costUsd,
+		},
 		costUsd,
 		stopReason,
 		aborted,
 		errorMessage,
 		turns: agent.state.messages.filter((m) => m.role === "assistant").length,
 	};
+}
+
+/** Shape of the raw JSON we ask the worker for — every field optional, nothing trusted. */
+interface RawHandoff {
+	completed?: string;
+	leftUndone?: unknown;
+	issues?: unknown;
+	proceduresFollowed?: boolean;
+	procedureNotes?: string;
+	assertionsClaimed?: unknown;
+	confidence?: unknown;
+}
+
+/** Split the worker's final message into human prose and the structured handoff. */
+function parseHandoff(finalText: string): { prose: string; handoff: RawHandoff | null } {
+	const fence = finalText.match(/```handoff\s*\n([\s\S]*?)```/);
+	if (fence?.[1]) {
+		const parsed = parseJson<RawHandoff>(fence[1]);
+		const prose = finalText.replace(fence[0], "").trim();
+		if (parsed) return { prose, handoff: parsed };
+		return { prose, handoff: null };
+	}
+	// Fall back to any JSON object in the message — models sometimes drop the fence tag.
+	const loose = parseJson<RawHandoff>(finalText);
+	if (loose && (loose.completed !== undefined || loose.leftUndone !== undefined)) {
+		return { prose: finalText.replace(/```[\s\S]*?```/g, "").trim(), handoff: loose };
+	}
+	return { prose: finalText.trim(), handoff: null };
+}
+
+/** Recover a bash exit code from a tool result. Non-zero exits surface as an error with a marker. */
+function exitCodeOf(result: unknown, isError: boolean): number | null {
+	if (!isError) return 0;
+	const text = typeof result === "string" ? result : JSON.stringify(result ?? "");
+	const m = text.match(/Command exited with code (\d+)/);
+	return m?.[1] ? Number(m[1]) : null;
+}
+
+function stringList(v: unknown): string[] {
+	if (!Array.isArray(v)) return [];
+	return v.map((x) => (typeof x === "string" ? x : String(x ?? ""))).filter((s) => s.trim().length > 0);
+}
+
+function issueList(v: unknown): HandoffIssue[] {
+	if (!Array.isArray(v)) return [];
+	const out: HandoffIssue[] = [];
+	for (const raw of v) {
+		if (typeof raw === "string") {
+			if (raw.trim()) out.push({ summary: raw.trim() });
+			continue;
+		}
+		const o = raw as { summary?: unknown; detail?: unknown };
+		const summary = typeof o?.summary === "string" ? o.summary.trim() : "";
+		if (!summary) continue;
+		out.push({ summary, detail: typeof o.detail === "string" ? o.detail : undefined });
+	}
+	return out;
+}
+
+function confidenceOf(v: unknown): Handoff["confidence"] {
+	return v === "high" || v === "medium" || v === "low" ? v : "medium";
 }
 
 function extractFinal(messages: AgentMessage[]): string {

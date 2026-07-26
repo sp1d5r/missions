@@ -21,6 +21,7 @@ interface Flags {
 	rfc: string;
 	budget: number;
 	maxFeatures: number;
+	maxMilestones: number;
 	out?: string;
 	branch?: string;
 	check?: string;
@@ -38,6 +39,7 @@ function parseArgs(argv: string[]): Flags {
 		rfc: "",
 		budget: 8,
 		maxFeatures: 1,
+		maxMilestones: 3,
 		open: false,
 		help: false,
 	};
@@ -56,6 +58,7 @@ function parseArgs(argv: string[]): Flags {
 		else if (a === "--rfc") f.rfc = next();
 		else if (a === "--budget") f.budget = Number.parseFloat(next());
 		else if (a === "--max-features") f.maxFeatures = Number.parseInt(next(), 10);
+		else if (a === "--max-milestones") f.maxMilestones = Number.parseInt(next(), 10);
 		else if (a === "--out") f.out = resolve(next());
 		else if (a === "--branch") f.branch = next();
 		else if (a === "--check") f.check = next();
@@ -83,7 +86,8 @@ Flags:
   --goal "<text>"     Mission goal (run)
   --rfc <@file|text>  What's wrong / what you want (@file to read a file)
   --budget <usd>      Total USD budget (default: 8)
-  --max-features <n>  Features to execute this run (default: 1)
+  --max-features <n>  Features executed per milestone (default: 1)
+  --max-milestones <n> Corrective rounds before stopping for a human (default: 3)
   --check "<cmd>"     Extra scrutiny command (e.g. "npm test")
   --nadine|--generic  Force target adapter (default: auto-detect)
   --out <path>        Where to write state.json/report.html (default: <target>/.missions/runs/<id>)
@@ -116,6 +120,7 @@ function buildConfig(f: Flags, goal: string, rfc: string): MissionConfig {
 		outDir: f.out ?? resolve(f.target, ".missions", "runs", runId),
 		routing: autoRouting(),
 		maxFeatures: f.maxFeatures,
+		maxMilestones: f.maxMilestones,
 		checkCommand: f.check,
 		target: targetKind,
 	};

@@ -43,6 +43,14 @@ export interface Feature {
 	description: string;
 	/** Which contract assertions this feature is responsible for satisfying. */
 	assertionIds: string[];
+	/** Orchestrator-defined per-feature procedure the worker must follow and report adherence to. */
+	procedures?: string[];
+	/** 1-based milestone this feature was dispatched in. */
+	milestone?: number;
+	/** Where it came from: the original plan, or a milestone-boundary correction. */
+	origin?: "plan" | "correction";
+	/** For corrections: the failing assertions / bugs / issues this feature is meant to resolve. */
+	addresses?: string[];
 }
 
 /** Orchestrator output: what to build and how we'll prove it. */
@@ -85,7 +93,88 @@ export interface CommitRecord {
 	message: string;
 }
 
+// ---------------------------------------------------------------------------
+// Handoffs — the connective tissue between agents.
+//
+// A worker never just says "done". It writes down what it did, what it did NOT
+// do, what it ran, and what it found. Context survives because it is recorded,
+// not because the next agent is trusted to remember.
+// ---------------------------------------------------------------------------
+
+/** One command the worker actually ran. Captured from tool events, NOT self-reported. */
+export interface CommandRecord {
+	command: string;
+	/** null = killed, aborted, or exit code not recoverable from the tool result. */
+	exitCode: number | null;
+}
+
+export type IssueDisposition = "addressed" | "deferred";
+
+/** Something the worker discovered that a human or the orchestrator must decide about. */
+export interface HandoffIssue {
+	summary: string;
+	detail?: string;
+	/** Assigned by the orchestrator at a milestone boundary. Undefined = still open, and blocks the milestone. */
+	disposition?: IssueDisposition;
+	/** Which correction picks it up, or why it is safe to defer. */
+	dispositionNote?: string;
+}
+
+/** Structured worker handoff. Free prose alone is not accepted. */
+export interface Handoff {
+	featureId: string;
+	milestone: number;
+	/** What was actually changed. */
+	completed: string;
+	/** Anything in the feature spec that was NOT done, and why. */
+	leftUndone: string[];
+	/** Deterministic record of every bash command and its exit code. */
+	commands: CommandRecord[];
+	/** Discoveries outside the feature's scope that need a decision. */
+	issues: HandoffIssue[];
+	/** Did the worker follow the orchestrator's procedures for this feature? */
+	proceduresFollowed: boolean;
+	procedureNotes?: string;
+	/** Assertion ids the worker CLAIMS to have satisfied. Validators decide independently. */
+	assertionsClaimed: string[];
+	confidence: "high" | "medium" | "low";
+	/** True when the worker failed to emit a parseable handoff and we fell back to its prose. */
+	degraded?: boolean;
+	/** Harness-side facts about the run. */
+	stopReason: string;
+	aborted: boolean;
+	costUsd: number;
+	commitSha?: string;
+}
+
+export type MilestoneVerdict =
+	/** Contract satisfied, no blocking bugs, no open issues. */
+	| "passed"
+	/** Orchestrator scoped corrective features; another milestone follows. */
+	| "corrections-scoped"
+	/** Ran out of money before the contract was satisfied. */
+	| "budget-exhausted"
+	/** Hit maxMilestones with work still outstanding. */
+	| "max-milestones"
+	/** Not clean, but the orchestrator had no corrections to offer. Needs a human. */
+	| "stalled";
+
+export interface MilestoneRecord {
+	index: number;
+	featureIds: string[];
+	handoffs: Handoff[];
+	scoreCard: ScoreCard;
+	verdict: MilestoneVerdict;
+	/** Orchestrator's read of the boundary — why it did what it did. */
+	assessment?: string;
+	/** Ids of corrective features scoped off the back of this milestone. */
+	correctionIds: string[];
+}
+
 export type MissionStatus = "planning" | "working" | "validating" | "reporting" | "succeeded" | "failed";
+
+/** Did the mission end clean, or does it want a human? Independent of run success/crash. */
+export type MissionOutcome = "clean" | "needs-review";
 
 export interface MissionConfig {
 	goal: string;
@@ -99,8 +188,10 @@ export interface MissionConfig {
 	/** Where mission artifacts (state.json, report.html, log) are written. */
 	outDir: string;
 	routing: ModelRouting;
-	/** Phase 0 executes at most this many features per run. */
+	/** Max features executed per milestone. */
 	maxFeatures: number;
+	/** Max milestones (initial pass + corrective rounds) before we stop and ask for a human. Default 3. */
+	maxMilestones?: number;
 	/** Optional repo check command run by the scrutiny validator (e.g. "npm test"). */
 	checkCommand?: string;
 	/** Which target adapter to use for behavioral validation. */
@@ -122,8 +213,18 @@ export interface MissionState {
 	/** Isolated worktree dir the worker operated in (present when useWorktree). */
 	worktreePath?: string;
 	plan?: Plan;
+	/** Every feature dispatched, plan + corrections, in dispatch order. */
+	features: Feature[];
+	/** Every handoff, flat, in order. */
+	handoffs: Handoff[];
+	/** One record per completed milestone. */
+	milestones: MilestoneRecord[];
 	commits: CommitRecord[];
+	/** Score card from the FINAL milestone. */
 	scoreCard?: ScoreCard;
+	/** Verdict of the final milestone — why the mission stopped. */
+	finalVerdict?: MilestoneVerdict;
+	outcome?: MissionOutcome;
 	costUsd: number;
 	reportPath?: string;
 	log: string[];
