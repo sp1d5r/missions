@@ -15,12 +15,71 @@ export type Item =
 
 export const RUNNING_STATUSES = RUNNING;
 
-function statusColor(status: string): (s: string) => string {
-	if (status === "succeeded") return chalk.green;
-	if (status === "failed") return chalk.red;
-	if (status === "merged") return chalk.magenta;
-	if (RUNNING.has(status)) return chalk.cyan;
-	return chalk.dim;
+// ---------------------------------------------------------------------------
+// Outcome vocabulary. "succeeded" only means the run did not crash — it says
+// nothing about whether the work is good. What you need at a glance is whether
+// a mission is safe to merge or wants your judgement, and why it stopped.
+// ---------------------------------------------------------------------------
+
+export type OutcomeKind = "clean" | "review" | "failed" | "merged" | "running";
+
+export function outcomeKind(r: ActiveRecord): OutcomeKind {
+	if (r.status === "merged") return "merged";
+	if (r.status === "failed") return "failed";
+	if (!r.done) return "running";
+	// Missions from before outcomes existed have no field — treat them as needing a look.
+	return r.outcome === "clean" ? "clean" : "review";
+}
+
+const OUTCOME_COLOR: Record<OutcomeKind, (s: string) => string> = {
+	clean: chalk.green,
+	review: chalk.yellow,
+	failed: chalk.red,
+	merged: chalk.magenta,
+	running: chalk.cyan,
+};
+
+const OUTCOME_SYMBOL: Record<OutcomeKind, string> = {
+	clean: "✓",
+	review: "⚑",
+	failed: "✗",
+	merged: "⇢",
+	running: "▸",
+};
+
+export function outcomeColor(r: ActiveRecord): (s: string) => string {
+	return OUTCOME_COLOR[outcomeKind(r)];
+}
+
+export function outcomeSymbol(r: ActiveRecord): string {
+	return OUTCOME_SYMBOL[outcomeKind(r)];
+}
+
+/** Short, honest reason the mission is sitting in your queue. */
+const VERDICT_LABEL: Record<string, string> = {
+	passed: "clean",
+	stalled: "stalled",
+	"max-milestones": "ceiling",
+	"budget-exhausted": "budget",
+	"corrections-scoped": "correcting",
+};
+
+export function verdictLabel(r: ActiveRecord): string {
+	if (r.status === "merged") return "merged";
+	if (r.status === "failed") return "crashed";
+	if (r.verdict) return VERDICT_LABEL[r.verdict] ?? r.verdict;
+	if (!r.done) return r.status;
+	return r.outcome === "clean" ? "clean" : "review";
+}
+
+/** "m2/3" milestone progress. Empty for missions predating the milestone loop. */
+export function milestoneLabel(r: ActiveRecord): string {
+	if (!r.maxMilestones) return "";
+	return `m${r.milestone ?? 0}/${r.maxMilestones}`;
+}
+
+export function money(n: number | undefined): string {
+	return `$${(n ?? 0).toFixed(2)}`;
 }
 
 function pad(s: string, w: number): string {
@@ -48,9 +107,10 @@ export function buildItems(records: ActiveRecord[], suggestions: Suggestion[]): 
 
 function actionsFor(item: Item): string {
 	if (item.kind === "review") {
-		return item.rec.status === "failed"
-			? "⏎ report · r retry · d dismiss"
-			: "⏎ report · a accept+merge · w worktree · d dismiss";
+		const kind = outcomeKind(item.rec);
+		if (kind === "failed") return "⏎ report · r retry · d dismiss";
+		if (kind === "review") return `⏎ report · ${chalk.yellow("a merge anyway")} · r retry · w worktree · d dismiss`;
+		return "⏎ report · a accept+merge · w worktree · d dismiss";
 	}
 	if (item.kind === "running") return "⏎ worktree · o report";
 	return `⏎ dispatch · e edit${item.sug.rationale ? chalk.dim(` — ${item.sug.rationale}`) : ""}`;
@@ -70,18 +130,22 @@ export function renderFrame(s: RenderState): string {
 	const { items, selected, now } = s;
 	const W = Math.max(80, s.width);
 	const cStatus = 11;
-	const cRepo = 15;
+	const cMile = 6;
+	const cRepo = 14;
+	const cCost = 7;
 	const cAge = 6;
-	const cGoal = Math.max(20, W - (cStatus + cRepo + cAge + 8));
+	const cGoal = Math.max(20, W - (cStatus + cMile + cRepo + cCost + cAge + 12));
 
 	const needs = items.filter((i) => i.kind === "review").length;
 	const run = items.filter((i) => i.kind === "running").length;
 	const sug = items.filter((i) => i.kind === "suggest").length;
+	const stalled = items.filter((i) => i.kind === "review" && outcomeKind(i.rec) === "review").length;
+	const spend = items.reduce((n, i) => (i.kind === "suggest" ? n : n + (i.rec.costUsd ?? 0)), 0);
 
 	const lines: string[] = [];
 	lines.push(
 		chalk.bold("  ☀  mission control") +
-			chalk.dim(`   ${needs} need you · ${run} running · ${sug} suggested`),
+			chalk.dim(`   ${needs} need you${stalled ? ` (${stalled} unresolved)` : ""} · ${run} running · ${sug} suggested · ${money(spend)} spent`),
 	);
 	lines.push(chalk.dim("  ↑↓ move · ⏎ act · a merge · r retry · d dismiss · n new · g ideas · q quit"));
 	lines.push("");
@@ -102,16 +166,17 @@ export function renderFrame(s: RenderState): string {
 		const marker = sel ? chalk.cyan("▶ ") : "  ";
 
 		if (item.kind === "suggest") {
-			const g = pad(item.sug.goal, cGoal + cAge + 2);
+			const g = pad(item.sug.goal, cGoal + cMile + cCost + cAge + 6);
 			const cells = `${pad("idea", cStatus)}  ${pad(item.sug.repoName, cRepo)}  ${g}`;
 			lines.push(marker + (sel ? chalk.inverse(cells) : chalk.dim(cells)));
 		} else {
 			const r = item.rec;
 			const doing = item.kind === "running" ? (r.lastActivity || "").replace(/\s+/g, " ").trim() : r.goal;
 			const goalCell = item.kind === "running" ? `${pad(r.goal, Math.floor(cGoal / 2))} ${chalk.dim(pad(doing, cGoal - Math.floor(cGoal / 2) - 1))}` : pad(doing, cGoal);
-			const status = pad(r.status, cStatus);
-			const cells = `${status}  ${pad(r.repoName, cRepo)}  ${goalCell}  ${pad(age(r.updatedAt, now), cAge)}`;
-			lines.push(marker + (sel ? chalk.inverse(cells) : statusColor(r.status)(cells.slice(0, cStatus)) + cells.slice(cStatus)));
+			// The verdict, not the status: "stalled" and "clean" are both "succeeded" runs.
+			const status = pad(verdictLabel(r), cStatus);
+			const cells = `${status}  ${pad(milestoneLabel(r), cMile)}  ${pad(r.repoName, cRepo)}  ${goalCell}  ${pad(money(r.costUsd), cCost)}  ${pad(age(r.updatedAt, now), cAge)}`;
+			lines.push(marker + (sel ? chalk.inverse(cells) : outcomeColor(r)(cells.slice(0, cStatus)) + cells.slice(cStatus)));
 		}
 
 		if (sel) lines.push(chalk.dim(`      ${actionsFor(item)}`));
@@ -151,6 +216,8 @@ export function runBoardTui(): Promise<void> {
 
 		let selected = 0;
 		let toast = "";
+		/** Mission id awaiting a second `a` press to confirm merging unresolved work. */
+		let pendingMerge: string | null = null;
 		let input: { active: boolean; label: string; buffer: string; onSubmit: (v: string) => void } | null = null;
 
 		const currentItems = (): Item[] => buildItems(readActive(), suggestions);
@@ -229,6 +296,14 @@ export function runBoardTui(): Promise<void> {
 				toast = chalk.yellow("no worktree to merge");
 				return;
 			}
+			// An unresolved mission left failing assertions, blocking bugs, or unruled issues
+			// behind. Merging it is a real decision, so make it take two keystrokes.
+			if (outcomeKind(r) === "review" && pendingMerge !== r.id) {
+				pendingMerge = r.id;
+				toast = chalk.yellow(`⚠ ${verdictLabel(r)} — read the report first. Press a again to merge anyway.`);
+				return;
+			}
+			pendingMerge = null;
 			const res = mergeBranch(r.repo, `missions/${r.id}`);
 			if (res.ok) {
 				removeWorktree(r.repo, r.worktreePath);
@@ -260,6 +335,9 @@ export function runBoardTui(): Promise<void> {
 				draw();
 				return;
 			}
+
+			// Any key other than a second `a` cancels a pending merge confirmation.
+			if (key.name !== "a") pendingMerge = null;
 
 			const items = currentItems();
 			if (key.name === "q" || key.name === "escape" || (key.ctrl && key.name === "c")) return cleanup();

@@ -1,6 +1,10 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { BehavioralResult, Target } from "./types.js";
+import type { BehavioralResult, Target, WorktreeBootstrapSpec } from "./types.js";
+
+/** Gitignored things almost every repo has and no worktree inherits. Missing entries are skipped. */
+const COMMON_ENV_FILES = [".env", ".env.local"];
+const COMMON_LINK_DIRS = ["node_modules", ".venv", "venv"];
 
 export function topLevelRecon(cwd: string): string {
 	const entries = readdirSync(cwd, { withFileTypes: true })
@@ -30,6 +34,15 @@ export const genericTarget: Target = {
 			}
 		}
 		return undefined;
+	},
+	bootstrapSpec(cwd): WorktreeBootstrapSpec {
+		// Only top level, and only what is actually there — a generic repo gets no guesses
+		// about its layout, just the env and dependency dirs a worktree provably lacks.
+		return {
+			envFiles: COMMON_ENV_FILES.filter((f) => existsSync(join(cwd, f))),
+			linkDirs: COMMON_LINK_DIRS.filter((d) => existsSync(join(cwd, d))),
+			sourceRoots: [],
+		};
 	},
 	async runBehavioral(): Promise<BehavioralResult> {
 		return { ran: false, passed: true, evidence: "No behavioral adapter for generic target (skipped)." };

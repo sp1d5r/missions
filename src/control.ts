@@ -8,7 +8,7 @@ import { mergeBranch, removeWorktree } from "./git.js";
 import { daemonExists, drainFrames, encode, socketPathFor } from "./ipc.js";
 import { type ActiveRecord, readActive, updateActive } from "./registry.js";
 import { generateSuggestions, loadSuggestions, type Suggestion } from "./suggest.js";
-import { buildItems, type Item } from "./tui.js";
+import { buildItems, type Item, milestoneLabel, money, outcomeColor, outcomeKind, outcomeSymbol, verdictLabel } from "./tui.js";
 
 const ESC = "\x1b";
 const ANSI = /\x1b\[[0-9;]*m/g;
@@ -76,8 +76,6 @@ function wrapAnsi(line: string, width: number): string[] {
 	return out;
 }
 
-const SYM: Record<string, string> = { succeeded: "✓", failed: "✗", merged: "✓" };
-
 /** Render the right-hand board pane. */
 function boardPane(items: Item[], selected: number, focused: boolean, w: number, now: number): string[] {
 	const lines: string[] = [];
@@ -91,25 +89,38 @@ function boardPane(items: Item[], selected: number, focused: boolean, w: number,
 		}
 		const sel = focused && i === selected;
 		let text: string;
+		let meta = "";
 		if (item.kind === "suggest") {
 			text = `${chalk.dim("•")} ${item.sug.goal}`;
-		} else if (item.kind === "running") {
-			const secs = Math.max(0, Math.round((now - Date.parse(item.rec.updatedAt)) / 1000));
-			text = `${chalk.cyan("▸")} ${item.rec.goal}  ${chalk.dim(`${secs}s`)}`;
 		} else {
 			const r = item.rec;
-			const sym = SYM[r.status] ?? "•";
-			const color = r.status === "failed" ? chalk.red : chalk.green;
-			text = `${color(sym)} ${r.goal}`;
+			const parts = [milestoneLabel(r), money(r.costUsd)].filter(Boolean);
+			if (item.kind === "running") {
+				parts.push(`${Math.max(0, Math.round((now - Date.parse(r.updatedAt)) / 1000))}s`);
+			} else {
+				// Lead with WHY it wants you — "stalled" and "clean" are both succeeded runs.
+				parts.unshift(verdictLabel(r));
+			}
+			meta = chalk.dim(parts.join(" · "));
+			text = `${outcomeColor(r)(outcomeSymbol(r))} ${r.goal}`;
 		}
-		const body = sel ? chalk.inverse(padVis(text.replace(ANSI, ""), w - 2)) : truncVis(text, w - 2);
+		// Right-align the metadata so the column scans vertically.
+		const room = w - 2;
+		const metaLen = visLen(meta);
+		const body = sel
+			? chalk.inverse(padVis(`${text.replace(ANSI, "")}${meta ? `  ${meta.replace(ANSI, "")}` : ""}`, room))
+			: metaLen && visLen(text) + metaLen + 2 <= room
+				? `${padVis(truncVis(text, room - metaLen - 1), room - metaLen)}${meta}`
+				: truncVis(text, room);
 		lines.push(`${sel ? chalk.cyan("▌") : " "} ${body}`);
 		if (sel) {
 			const hint =
 				item.kind === "review"
-					? item.rec.status === "failed"
+					? outcomeKind(item.rec) === "failed"
 						? "⏎ report · r retry · d dismiss"
-						: "⏎ report · a merge · w tree · d dismiss"
+						: outcomeKind(item.rec) === "review"
+							? `⏎ report · ${chalk.yellow("a merge anyway")} · r retry · d dismiss`
+							: "⏎ report · a merge · w tree · d dismiss"
 					: item.kind === "running"
 						? "⏎ worktree · o report"
 						: "⏎ dispatch";
@@ -185,6 +196,8 @@ export async function runControl(targetCwd: string): Promise<void> {
 	let suggestions: Suggestion[] = loadSuggestions();
 	let mode: "chat" | "board" = "chat";
 	let selected = 0;
+	/** Mission id awaiting a second `a` press to confirm merging unresolved work. */
+	let pendingMerge: string | null = null;
 	let buffer = "";
 	let toast = "";
 	let awaiting = false;
@@ -216,9 +229,10 @@ export async function runControl(targetCwd: string): Promise<void> {
 
 		const needs = its.filter((i) => i.kind === "review").length;
 		const run = its.filter((i) => i.kind === "running").length;
-		const header =
-			padVis(`  ${chalk.bold("☀ mission control")}  ${chalk.dim(`${basename(targetCwd)} · ${run} running · ${needs} need you`)}`, W - 13) +
-			chalk.dim(mode === "chat" ? "[Tab] board " : "[Tab] chat  ");
+		const unresolved = its.filter((i) => i.kind === "review" && outcomeKind(i.rec) === "review").length;
+		const spend = its.reduce((n, i) => (i.kind === "suggest" ? n : n + (i.rec.costUsd ?? 0)), 0);
+		const summary = `${basename(targetCwd)} · ${run} running · ${needs} need you${unresolved ? ` (${unresolved} unresolved)` : ""} · ${money(spend)}`;
+		const header = padVis(`  ${chalk.bold("☀ mission control")}  ${chalk.dim(summary)}`, W - 13) + chalk.dim(mode === "chat" ? "[Tab] board " : "[Tab] chat  ");
 
 		const rows: string[] = [header];
 		for (let y = 0; y < bodyH; y++) {
@@ -282,6 +296,13 @@ export async function runControl(targetCwd: string): Promise<void> {
 	const acceptMerge = (r: ActiveRecord): void => {
 		if (r.status !== "succeeded") return void (toast = chalk.yellow("only succeeded missions can merge"));
 		if (!r.worktreePath) return void (toast = chalk.yellow("no worktree to merge"));
+		// Unresolved = failing assertions, blocking bugs, or issues nobody ruled on.
+		// Landing that is a decision, so it costs a second keystroke.
+		if (outcomeKind(r) === "review" && pendingMerge !== r.id) {
+			pendingMerge = r.id;
+			return void (toast = chalk.yellow(`⚠ ${verdictLabel(r)} — read the report first. Press a again to merge anyway.`));
+		}
+		pendingMerge = null;
 		const res = mergeBranch(r.repo, `missions/${r.id}`);
 		if (res.ok) {
 			removeWorktree(r.repo, r.worktreePath);
@@ -293,6 +314,8 @@ export async function runControl(targetCwd: string): Promise<void> {
 	};
 
 	const boardKey = (name: string): void => {
+		// Any key other than a second `a` cancels a pending merge confirmation.
+		if (name !== "a") pendingMerge = null;
 		const its = items();
 		const item = its[selected];
 		if (name === "up") selected = Math.max(0, selected - 1);
