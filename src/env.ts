@@ -93,24 +93,19 @@ export function resolveMissionEnv(options: ResolveMissionEnvOptions): NodeJS.Pro
 		env.PYTHONPATH = [...sourceRoots, env.PYTHONPATH].filter(Boolean).join(":");
 	}
 
-	// Point every package manager at a shared, immutable cache.
+	// Package caches are deliberately NOT redirected.
 	//
-	// Setting a worktree up properly means a real install per mission, which is only affordable
-	// because package managers are built to resolve from a global store: pnpm hardlinks from a
-	// content-addressed store, and pip/pdm/uv skip the download entirely on a cache hit. Without
-	// this, six parallel missions each re-download the world. The cache is shared but append-only
-	// by nature, so it does not reintroduce the shared MUTABLE state that inheriting deps had.
-	const cacheRoot = join(homedir(), ".missions", "pkg-cache");
-	for (const [key, sub] of [
-		["PDM_CACHE_DIR", "pdm"],
-		["UV_CACHE_DIR", "uv"],
-		["PIP_CACHE_DIR", "pip"],
-		["PNPM_STORE_DIR", "pnpm"],
-		["npm_config_cache", "npm"],
-		["YARN_CACHE_FOLDER", "yarn"],
-	] as const) {
-		if (!env[key]) env[key] = join(cacheRoot, sub);
-	}
+	// This used to point PDM_CACHE_DIR/PNPM_STORE_DIR/npm_config_cache/… at a missions-private
+	// ~/.missions/pkg-cache. The reasoning — a real install per mission is only affordable if
+	// package managers can resolve from a warm content-addressed store — was right; the
+	// implementation inverted it. Pointing at a FRESH directory means the machine's existing
+	// warm caches are ignored and every mission re-downloads from cold into a second copy of a
+	// store that already exists. Measured 643M of pure duplicate before this was reverted, on a
+	// run that then filled the disk.
+	//
+	// These stores are content-addressed and append-only, so sharing the machine's real ones is
+	// safe in exactly the way the original comment claimed — it just has to be the real ones.
+	// Isolation belongs at the venv and node_modules level, which the worktree already provides.
 
 	if (binDirs?.length) {
 		// Prepend for the same reason as PYTHONPATH: a bare `python`, `pytest` or `ruff` must be

@@ -88,15 +88,50 @@ export function findSetupDoc(repoCwd: string): string | null {
 
 /**
  * Hash everything that would make a recorded setup wrong: the instructions themselves, every
- * lockfile, and the platform. Deliberately NOT the whole tree — source changes do not
- * invalidate an install, and hashing them would defeat the cache on every mission.
+ * lockfile, the platform, and the SCOPE it was installed for. Deliberately NOT the whole tree —
+ * source changes do not invalidate an install, and hashing them would defeat the cache on every
+ * mission.
+ *
+ * Scope is in the key because a record is only reusable by a mission that needs no more than it
+ * installed. Without it, a mission scoped to `shared/` would record a two-project install that a
+ * later backend mission would replay and then fail inside, for reasons nothing in its log explains.
  */
-function inputsHash(repoCwd: string, docRel: string | null): string {
+export function inputsHash(repoCwd: string, docRel: string | null, scope: string[] = []): string {
 	const h = createHash("sha256");
 	h.update(process.platform);
+	h.update(`scope:${[...scope].sort().join(",")}`);
 	if (docRel && existsSync(join(repoCwd, docRel))) h.update(readFileSync(join(repoCwd, docRel)));
 	for (const lock of findLockfiles(repoCwd)) h.update(lock).update(readFileSync(join(repoCwd, lock)));
 	return h.digest("hex").slice(0, 16);
+}
+
+/**
+ * The top-level project directories a mission plausibly needs, read off its own brief.
+ *
+ * A monorepo has no single answer to "what does this repo need to run" — nadine is eleven
+ * projects, six Python and five JavaScript. Installing all of them for a mission that edits one
+ * cost ~5GB per worktree and filled the disk; three live worktrees was 13.9GB. But the setup
+ * agent cannot scope what it is never told, so it did the only safe thing and installed
+ * everything.
+ *
+ * Deliberately literal: directories named in the goal or RFC, not an inferred dependency graph.
+ * An RFC that means to touch a project says its name — and when nothing matches we return [],
+ * which means "install everything" rather than a confidently wrong subset. Under-installing is
+ * far worse than over-installing: it fails deep inside a worker with a missing import.
+ */
+export function missionScope(repoCwd: string, brief: string): string[] {
+	if (!brief.trim()) return [];
+	let dirs: string[] = [];
+	try {
+		dirs = readdirSync(repoCwd, { withFileTypes: true })
+			.filter((e) => e.isDirectory() && !e.name.startsWith(".") && e.name !== "node_modules")
+			.map((e) => e.name);
+	} catch {
+		return [];
+	}
+	// Only directories that are actually projects — a bare folder needs no install.
+	const projects = dirs.filter((d) => LOCKFILE_NAMES.some((n) => existsSync(join(repoCwd, d, n))) || existsSync(join(repoCwd, d, "package.json")) || existsSync(join(repoCwd, d, "pyproject.toml")));
+	return projects.filter((d) => new RegExp(`(^|[\\s"'\`(\\[/])${d.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/`).test(brief));
 }
 
 /** Lockfiles at the root or one level down — deep enough for a service-per-directory monorepo. */
@@ -259,17 +294,24 @@ export interface RunSetupOptions {
 	workCwd: string;
 	model: ModelSpec;
 	env: NodeJS.ProcessEnv;
+	/**
+	 * The mission's goal + RFC, used only to scope which projects get installed in a monorepo.
+	 * Omit and setup installs everything, which is correct but can be very expensive.
+	 */
+	brief?: string;
 	budgetUsd?: number;
 	stepTimeoutMs?: number;
 	onProgress?: (msg: string) => void;
 }
 
 export async function runSetup(options: RunSetupOptions): Promise<SetupResult> {
-	const { targetCwd, workCwd, model: spec, env, budgetUsd = 2, stepTimeoutMs = 20 * 60_000, onProgress } = options;
+	const { targetCwd, workCwd, model: spec, env, brief = "", budgetUsd = 2, stepTimeoutMs = 20 * 60_000, onProgress } = options;
 	const notes: string[] = [];
 	const docRel = findSetupDoc(workCwd);
-	const hash = inputsHash(workCwd, docRel);
+	const scope = missionScope(workCwd, brief);
+	const hash = inputsHash(workCwd, docRel, scope);
 	const record = readRecord(targetCwd);
+	if (scope.length) onProgress?.(`scoped to ${scope.join(", ")} — the projects this mission's brief names`);
 
 	// ── Replay: the fast, deterministic, no-LLM path ────────────────────────────────────
 	if (record && record.inputsHash === hash && record.steps.length) {
@@ -332,10 +374,15 @@ export async function runSetup(options: RunSetupOptions): Promise<SetupResult> {
 
 	onProgress?.(`setup agent working${docRel ? ` from ${docRel}` : " (no setup doc — will create one)"}`);
 	try {
+		const scopeNote = scope.length
+			? `\nSCOPE: this mission works in ${scope.map((s) => `${s}/`).join(", ")}. This is a monorepo — install ONLY what those need (plus anything they depend on inside this repo), and skip every other project. Installing the whole repo costs gigabytes per worktree and is paid again on every mission.\nIf you find one of those projects genuinely cannot be set up without another, install that one too and say why in your notes.`
+			: `\nSCOPE: not determined from the brief — set up whatever the repo needs to build and be checked.`;
+
 		await agent.prompt(`Set up this worktree so a coding agent can build, run and test it.
 
 WORKTREE: ${workCwd}
 ${docNote}
+${scopeNote}
 
 Set it up, verify it, correct the doc if it was wrong, then emit your setup block.`);
 	} catch (err) {
@@ -359,7 +406,7 @@ Set it up, verify it, correct the doc if it was wrong, then emit your setup bloc
 	if (parsed.ok && parsed.steps?.length) {
 		writeRecord({
 			repo: targetCwd,
-			inputsHash: inputsHash(workCwd, findSetupDoc(workCwd)),
+			inputsHash: inputsHash(workCwd, findSetupDoc(workCwd), scope),
 			docPath: findSetupDoc(workCwd) ?? "",
 			recordedAt: new Date().toISOString(),
 			steps: parsed.steps,

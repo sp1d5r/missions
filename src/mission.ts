@@ -117,6 +117,8 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 			workCwd,
 			model: config.routing.worker,
 			env: resolveMissionEnv({ targetCwd: config.targetCwd, workCwd, missionId: store.state.id, sourceRoots: [] }),
+			// So setup can install this mission's projects rather than the whole monorepo.
+			brief: `${config.goal}\n\n${config.rfc ?? ""}`,
 			onProgress: (m) => emit(`  setup: ${m}`),
 		});
 		sourceRoots = setup.sourceRoots;
