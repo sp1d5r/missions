@@ -457,6 +457,11 @@ export async function runControl(targetCwd: string): Promise<void> {
 
 	/** Derive the outDir for a mission record (conventional path). */
 	const outDirFor = (rec: import("./registry.js").ActiveRecord): string | undefined => {
+		// Prefer the recorded outDir. Deriving it from rec.id cannot work: a mission id is
+		// `m-<ts>` while its run directory is `run-<ts>` with a different millisecond, so the
+		// derived path never exists and Enter silently falls through — the view was unreachable.
+		// The derivation stays as a fallback for records written before outDir was stored.
+		if (rec.outDir && existsSync(join(rec.outDir, "state.json"))) return rec.outDir;
 		const candidate = join(rec.repo, ".missions", "runs", rec.id);
 		return existsSync(join(candidate, "state.json")) ? candidate : undefined;
 	};

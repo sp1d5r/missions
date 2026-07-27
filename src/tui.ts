@@ -277,6 +277,11 @@ export function runBoardTui(): Promise<void> {
 			const { join: pathJoin } = require("node:path") as typeof import("node:path");
 			// eslint-disable-next-line @typescript-eslint/no-require-imports
 			const { existsSync: fsExists } = require("node:fs") as typeof import("node:fs");
+		// Prefer the recorded outDir. Deriving it from rec.id cannot work: a mission id is
+		// `m-<ts>` while its run directory is `run-<ts>` with a different millisecond, so the
+		// derived path never exists and Enter silently falls through — the view was unreachable.
+		// The derivation stays as a fallback for records written before outDir was stored.
+			if (rec.outDir && fsExists(pathJoin(rec.outDir, "state.json"))) return rec.outDir;
 			const candidate = pathJoin(rec.repo, ".missions", "runs", rec.id);
 			return fsExists(pathJoin(candidate, "state.json")) ? candidate : undefined;
 		};
