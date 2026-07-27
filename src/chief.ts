@@ -8,6 +8,7 @@ import { cmuxOpenBrowser, cmuxOpenDiff, hasCmuxPassword, insideCmux } from "./cm
 import { runMission } from "./mission.js";
 import { autoRouting } from "./models.js";
 import { readActive } from "./registry.js";
+import { renderSweep, sweep } from "./lifecycle.js";
 import { dispatchScouts, loadAgentSpecs } from "./subagent.js";
 import { listWorkspaces, registerWorkspace, resolveWorkspace, workspaceNames } from "./workspaces.js";
 import type { MissionConfig } from "./types.js";
@@ -224,6 +225,26 @@ function buildTools(focus: () => string, runner: () => MissionRunner): AgentTool
 		},
 	} as unknown as AgentTool;
 
+	const gcTool = {
+		name: "reclaim_disk",
+		label: "reclaim disk",
+		description:
+			"Reclaim disk from finished missions: remove their worktrees and delete branches already merged into main. " +
+			"Worktrees holding uncommitted work, missions still running, and missions you have not reviewed yet are all left alone. " +
+			"Use when asked to clean up or free space. Report what it says, including anything it refused.",
+		parameters: Type.Object({
+			repo: REPO_PARAM,
+			dryRun: Type.Optional(Type.Boolean({ description: "Report what would be removed without deleting. Prefer this first if the user seems unsure." })),
+		}),
+		async execute(_id: string, params: { repo?: string; dryRun?: boolean }) {
+			const scoped = params.repo ? resolveWorkspace(params.repo, focus()) : undefined;
+			if (params.repo && !scoped) return unknownRepo(params.repo);
+			const dry = params.dryRun ?? false;
+			const result = sweep({ repos: scoped ? [scoped.path] : undefined, dryRun: dry });
+			return { content: [{ type: "text", text: renderSweep(result, dry).join("\n") }] };
+		},
+	} as unknown as AgentTool;
+
 	const boardTool = {
 		name: "board_hint",
 		label: "board",
@@ -235,7 +256,7 @@ function buildTools(focus: () => string, runner: () => MissionRunner): AgentTool
 	} as unknown as AgentTool;
 
 	// Direct read tools follow the focus repo; everything else takes a repo argument.
-	return [...createReadOnlyTools(focus()), runMissionTool, listTool, workspacesTool, investigateTool, boardTool];
+	return [...createReadOnlyTools(focus()), runMissionTool, listTool, workspacesTool, investigateTool, gcTool, boardTool];
 }
 
 export interface ChiefSession {

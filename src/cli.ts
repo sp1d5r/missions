@@ -13,6 +13,7 @@ import { missionDebrief, renderBriefing } from "./diagram-text.js";
 import { runDaemon, stopOrg } from "./daemon.js";
 import { runMission } from "./mission.js";
 import { forgetWorkspace, listWorkspaces, registerWorkspace } from "./workspaces.js";
+import { renderSweep, sweep } from "./lifecycle.js";
 import { autoRouting } from "./models.js";
 import { StateStore } from "./state.js";
 import { runBoardTui } from "./tui.js";
@@ -35,6 +36,8 @@ interface Flags {
 	targetKind?: "generic" | "nadine";
 	open: boolean;
 	help: boolean;
+	/** gc only: report what would be removed and touch nothing. */
+	dryRun: boolean;
 	socket?: string;
 	/** Non-flag arguments after the command, e.g. `missions forget nadine`. */
 	args: string[];
@@ -53,6 +56,7 @@ function parseArgs(argv: string[]): Flags {
 		maxVideos: 4,
 		open: false,
 		help: false,
+		dryRun: false,
 		args: [],
 	};
 	const rest = f.cmd === argv[0] ? argv.slice(1) : argv;
@@ -80,6 +84,7 @@ function parseArgs(argv: string[]): Flags {
 		else if (a === "--nadine") f.targetKind = "nadine";
 		else if (a === "--generic") f.targetKind = "generic";
 		else if (a === "--open") f.open = true;
+		else if (a === "--dry-run") f.dryRun = true;
 		else if (a.startsWith("-")) throw new Error(`Unknown flag: ${a}`);
 		else f.args.push(a);
 	}
@@ -94,6 +99,7 @@ Usage:
   missions repos                                 List every repo the org knows about
   missions forget <name>                         Drop a repo from the org (e.g. a throwaway sandbox)
   missions stop                                  Stop the org (running missions are abandoned)
+  missions gc [--target <repo>] [--dry-run]      Reclaim worktrees from finished missions; delete merged branches
   missions peek [--target <repo>]                Read-only board TUI, no chief attached (quick glance)
   missions attach [--target <repo>]              Text-only chief chat, no board pane (dumb terminals)
   missions run --target <repo> --goal "..." [--rfc @file|text] [flags]   Non-interactive single mission
@@ -115,6 +121,7 @@ Flags:
   --out <path>        Where to write state.json/report.html (default: <target>/.missions/runs/<id>)
   --branch <name>     Work branch (default: missions/<date>)
   --open              Open report.html when done
+  --dry-run           gc: show what would be reclaimed, delete nothing
   -h, --help          This help
 
 Env: ANTHROPIC_API_KEY required. OPENAI_API_KEY enables cross-provider bug-spotter. GEMINI_API_KEY for Nadine judges.
@@ -246,6 +253,20 @@ async function main(): Promise<void> {
 		if (!ref) throw new Error("forget requires a repo: missions forget <name-or-path>");
 		const gone = forgetWorkspace(ref);
 		process.stdout.write(gone ? `${chalk.bold("forgot")} ${gone.name} ${chalk.dim(gone.path)}\n` : chalk.yellow(`no workspace matches "${ref}"\n`));
+		return;
+	}
+
+	if (f.cmd === "gc") {
+		// Default to every registered repo: a leak you have to remember to look for
+		// in each workspace is a leak. `--target` narrows it to one.
+		const repos = f.args.includes("--here") || f.target !== process.cwd() ? [resolve(f.target)] : undefined;
+		const dry = f.dryRun;
+		process.stdout.write(`${chalk.bold("gc")} ${chalk.dim(dry ? "(dry run — nothing will be deleted)" : "")}\n`);
+		const result = sweep({ repos, dryRun: dry });
+		process.stdout.write(`${renderSweep(result, dry).join("\n")}\n`);
+		if (dry && (result.reclaimed.some((r) => !r.skipped) || result.droppedRecords)) {
+			process.stdout.write(chalk.dim("\n  run without --dry-run to apply\n"));
+		}
 		return;
 	}
 

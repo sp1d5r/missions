@@ -2,7 +2,8 @@ import { spawn } from "node:child_process";
 import { emitKeypressEvents } from "node:readline";
 import chalk from "chalk";
 import { cmuxOpenBrowser, cmuxOpenWorkspace, hasCmuxPassword, insideCmux } from "./cmux.js";
-import { mergeBranch, removeWorktree } from "./git.js";
+import { mergeBranch } from "./git.js";
+import { humanBytes, reclaimBranch, reclaimWorktree } from "./lifecycle.js";
 import { type ActiveRecord, readActive, updateActive } from "./registry.js";
 import { generateSuggestions, loadSuggestions, type Suggestion } from "./suggest.js";
 
@@ -304,14 +305,24 @@ export function runBoardTui(): Promise<void> {
 				return;
 			}
 			pendingMerge = null;
-			const res = mergeBranch(r.repo, `missions/${r.id}`);
+			const branch = `missions/${r.id}`;
+			const res = mergeBranch(r.repo, branch);
 			if (res.ok) {
-				removeWorktree(r.repo, r.worktreePath);
+				const wt = reclaimWorktree(r.repo, r.worktreePath, "merged");
+				reclaimBranch(r.repo, branch);
 				updateActive(r.id, { cleared: true, status: "merged" });
-				toast = chalk.green(`✓ merged missions/${r.id.slice(0, 8)} into ${r.repoName}`);
+				toast = chalk.green(`✓ merged missions/${r.id.slice(0, 8)} into ${r.repoName}`) + (wt.bytes ? chalk.dim(` · ${humanBytes(wt.bytes)} reclaimed`) : "");
 			} else {
 				toast = chalk.red(`merge failed: ${res.out.split("\n")[0]?.slice(0, 70)}`);
 			}
+		};
+
+		/** Dismiss/retry drop the worktree but never the branch — unmerged commits are the work. */
+		const reclaimFor = (r: ActiveRecord, reason: "dismissed" | "retried"): string => {
+			if (!r.worktreePath) return "";
+			const got = reclaimWorktree(r.repo, r.worktreePath, reason);
+			if (got.skipped === "uncommitted changes — left in place") return chalk.yellow(" · worktree kept (uncommitted work)");
+			return got.bytes ? chalk.dim(` · ${humanBytes(got.bytes)} reclaimed`) : "";
 		};
 
 		const onKey = (str: string, key: { name?: string; ctrl?: boolean; sequence?: string }): void => {
@@ -382,8 +393,9 @@ export function runBoardTui(): Promise<void> {
 				const item = items[selected];
 				if (item?.kind === "review") {
 					dispatch(item.rec.repo, item.rec.goal);
+					const note = reclaimFor(item.rec, "retried");
 					updateActive(item.rec.id, { cleared: true });
-					toast = chalk.green(`▶ re-dispatched: ${item.rec.goal.slice(0, 55)}`);
+					toast = chalk.green(`▶ re-dispatched: ${item.rec.goal.slice(0, 55)}`) + note;
 				}
 			} else if (key.name === "e") {
 				const item = items[selected];
@@ -402,8 +414,9 @@ export function runBoardTui(): Promise<void> {
 			} else if (key.name === "d") {
 				const item = items[selected];
 				if (item?.kind === "review") {
+					const note = reclaimFor(item.rec, "dismissed");
 					updateActive(item.rec.id, { cleared: true });
-					toast = chalk.dim("dismissed");
+					toast = chalk.dim("dismissed") + note;
 				}
 			}
 			draw();

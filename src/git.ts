@@ -3,7 +3,10 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 function git(cwd: string, args: string[]): string {
-	return execFileSync("git", args, { cwd, encoding: "utf-8", maxBuffer: 64 * 1024 * 1024 }).toString();
+	// stderr must be piped, not inherited: execFileSync's default sends the child's
+	// stderr straight to ours, so an expected failure (a branch that is checked out,
+	// a ref that does not exist) would print through the middle of a TUI frame.
+	return execFileSync("git", args, { cwd, encoding: "utf-8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] }).toString();
 }
 
 function gitSafe(cwd: string, args: string[]): { ok: boolean; out: string } {
@@ -68,6 +71,87 @@ export function addWorktree(repoCwd: string, worktreePath: string, branch: strin
 /** Remove a worktree (commits remain on its branch in the shared repo). */
 export function removeWorktree(repoCwd: string, worktreePath: string): void {
 	gitSafe(repoCwd, ["worktree", "remove", "--force", worktreePath]);
+}
+
+export interface WorktreeEntry {
+	path: string;
+	branch?: string;
+	/** git has the bookkeeping but the directory is gone. */
+	prunable: boolean;
+}
+
+/** Every worktree git knows about for this repo, including ones whose directory has vanished. */
+export function listWorktrees(repoCwd: string): WorktreeEntry[] {
+	const { ok, out } = gitSafe(repoCwd, ["worktree", "list", "--porcelain"]);
+	if (!ok) return [];
+	const entries: WorktreeEntry[] = [];
+	let cur: WorktreeEntry | undefined;
+	for (const line of out.split("\n")) {
+		if (line.startsWith("worktree ")) {
+			if (cur) entries.push(cur);
+			cur = { path: line.slice("worktree ".length).trim(), prunable: false };
+		} else if (cur && line.startsWith("branch ")) {
+			cur.branch = line.slice("branch ".length).trim().replace(/^refs\/heads\//, "");
+		} else if (cur && line.startsWith("prunable")) {
+			cur.prunable = true;
+		}
+	}
+	if (cur) entries.push(cur);
+	// The first entry is the main checkout, which is never a mission worktree.
+	return entries.slice(1);
+}
+
+/** Drop git's bookkeeping for worktrees whose directories are already gone. */
+export function pruneWorktrees(repoCwd: string): void {
+	gitSafe(repoCwd, ["worktree", "prune"]);
+}
+
+/**
+ * Whether a worktree holds anything that only exists there.
+ *
+ * Untracked files count. A worker that wrote a file and never committed it has
+ * produced work that no branch is holding, and removing the tree destroys it —
+ * so this is the gate every reclaim goes through.
+ */
+export function worktreeIsClean(worktreeCwd: string): boolean {
+	const { ok, out } = gitSafe(worktreeCwd, ["status", "--porcelain"]);
+	return ok && out.trim().length === 0;
+}
+
+/** Whether every commit on `branch` is already contained in `into`. */
+export function isMerged(repoCwd: string, branch: string, into: string): boolean {
+	const { ok, out } = gitSafe(repoCwd, ["branch", "--merged", into, "--format=%(refname:short)"]);
+	if (!ok) return false;
+	return out.split("\n").some((l) => l.trim() === branch);
+}
+
+/**
+ * Delete a branch, refusing if it holds commits nothing else has.
+ *
+ * Deliberately `-d`, never `-D`: the branch is the only durable artifact of a
+ * mission, so git's own merge check is the last thing standing between a
+ * dismissed mission and lost work.
+ */
+export function deleteBranch(repoCwd: string, branch: string): { ok: boolean; out: string } {
+	return gitSafe(repoCwd, ["branch", "-d", branch]);
+}
+
+/** Branch names matching a prefix, e.g. every `missions/…` branch. */
+export function branchesWithPrefix(repoCwd: string, prefix: string): string[] {
+	const { ok, out } = gitSafe(repoCwd, ["branch", "--list", `${prefix}*`, "--format=%(refname:short)"]);
+	if (!ok) return [];
+	return out
+		.split("\n")
+		.map((l) => l.trim())
+		.filter(Boolean);
+}
+
+/** The repo's default branch name, for deciding what "already merged" means. */
+export function defaultBranch(repoCwd: string): string {
+	for (const name of ["main", "master"]) {
+		if (gitSafe(repoCwd, ["rev-parse", "--verify", name]).ok) return name;
+	}
+	return currentBranch(repoCwd);
 }
 
 /** Merge a mission branch into the repo's currently checked-out branch. Non-throwing. */

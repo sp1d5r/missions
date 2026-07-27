@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { missionsPath } from "./paths.js";
 
@@ -41,6 +41,16 @@ export function updateActive(id: string, patch: Partial<ActiveRecord>): void {
 	try {
 		const rec = JSON.parse(readFileSync(p, "utf-8")) as ActiveRecord;
 		writeFileSync(p, JSON.stringify({ ...rec, ...patch }, null, 2));
+	} catch {
+		/* skip */
+	}
+}
+
+/** Drop a live record entirely. The run dir keeps the durable history. */
+export function removeActive(id: string): void {
+	try {
+		const p = join(ACTIVE_DIR(), `${id}.json`);
+		if (existsSync(p)) unlinkSync(p);
 	} catch {
 		/* skip */
 	}

@@ -4,7 +4,8 @@ import { basename } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import chalk from "chalk";
 import { cmuxOpenBrowser, cmuxOpenWorkspace, hasCmuxPassword, insideCmux } from "./cmux.js";
-import { mergeBranch, removeWorktree } from "./git.js";
+import { mergeBranch } from "./git.js";
+import { humanBytes, reclaimBranch, reclaimWorktree } from "./lifecycle.js";
 import { daemonExists, drainFrames, encode, orgSocketPath } from "./ipc.js";
 import { type ActiveRecord, readActive, updateActive } from "./registry.js";
 import { generateSuggestions, loadSuggestions, type Suggestion } from "./suggest.js";
@@ -428,14 +429,26 @@ export async function runControl(targetCwd: string): Promise<void> {
 			return void (toast = chalk.yellow(`⚠ ${verdictLabel(r)} — read the report first. Press a again to merge anyway.`));
 		}
 		pendingMerge = null;
-		const res = mergeBranch(r.repo, `missions/${r.id}`);
+		const branch = `missions/${r.id}`;
+		const res = mergeBranch(r.repo, branch);
 		if (res.ok) {
-			removeWorktree(r.repo, r.worktreePath);
+			// The commits are in the default branch now, so the worktree is a cache and
+			// the branch is a duplicate. `reclaimBranch` still asks git to confirm.
+			const wt = reclaimWorktree(r.repo, r.worktreePath, "merged");
+			reclaimBranch(r.repo, branch);
 			updateActive(r.id, { cleared: true, status: "merged" });
-			toast = chalk.green(`✓ merged missions/${r.id.slice(0, 8)} → ${r.repoName}`);
+			toast = chalk.green(`✓ merged missions/${r.id.slice(0, 8)} → ${r.repoName}${wt.bytes ? chalk.dim(` · ${humanBytes(wt.bytes)} reclaimed`) : ""}`);
 		} else {
 			toast = chalk.red(`merge failed: ${res.out.split("\n")[0]?.slice(0, 60)}`);
 		}
+	};
+
+	/** Dismiss/retry drop the worktree but never the branch — unmerged commits are the work. */
+	const reclaimFor = (r: ActiveRecord, reason: "dismissed" | "retried"): string => {
+		if (!r.worktreePath) return "";
+		const got = reclaimWorktree(r.repo, r.worktreePath, reason);
+		if (got.skipped === "uncommitted changes — left in place") return chalk.yellow(" · worktree kept (uncommitted work)");
+		return got.bytes ? chalk.dim(` · ${humanBytes(got.bytes)} reclaimed`) : "";
 	};
 
 	const boardKey = (name: string): void => {
@@ -461,11 +474,13 @@ export async function runControl(targetCwd: string): Promise<void> {
 		} else if (name === "a" && item.kind === "review") acceptMerge(item.rec);
 		else if (name === "r" && item.kind === "review") {
 			dispatch(item.rec.repo, item.rec.goal);
+			const note = reclaimFor(item.rec, "retried");
 			updateActive(item.rec.id, { cleared: true });
-			toast = chalk.green(`▶ re-dispatched: ${item.rec.goal.slice(0, 45)}`);
+			toast = chalk.green(`▶ re-dispatched: ${item.rec.goal.slice(0, 45)}`) + note;
 		} else if (name === "d" && item.kind === "review") {
+			const note = reclaimFor(item.rec, "dismissed");
 			updateActive(item.rec.id, { cleared: true });
-			toast = chalk.dim("dismissed");
+			toast = chalk.dim("dismissed") + note;
 		} else if (name === "o" && item.kind !== "suggest" && item.rec.reportPath) {
 			if (insideCmux() && hasCmuxPassword()) cmuxOpenBrowser(item.rec.reportPath);
 			else toast = chalk.dim(`report: ${item.rec.reportPath}`);

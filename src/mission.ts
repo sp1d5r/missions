@@ -4,6 +4,7 @@ import { provisionDbBranch } from "./db-branch.js";
 import { resolveMissionEnv } from "./env.js";
 import { addWorktree, commitAll, diffAgainst, ensureBranch, headSha, isGitRepo } from "./git.js";
 import { blocking, checkBoundary, checkPlan, formatViolations, warnings } from "./invariants.js";
+import { humanBytes, reclaimWorktree } from "./lifecycle.js";
 import { type CorrectionRuling, planMission, scopeCorrections } from "./orchestrator.js";
 import { writeActive, repoName } from "./registry.js";
 import { generateReport } from "./report.js";
@@ -424,6 +425,15 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 		if (dbTeardown) {
 			await dbTeardown();
 			emit("database: mission branch removed");
+		}
+		// A run that produced no commit has nothing on its branch, so its worktree is
+		// pure cost — and a crashed mission is exactly the case nobody comes back to
+		// action. Anything committed, or anything left uncommitted, is kept.
+		const wt = store.state.worktreePath;
+		if (wt && store.state.status === "failed" && !store.state.commits?.length) {
+			const got = reclaimWorktree(config.targetCwd, wt, "no-commits");
+			if (got.skipped) emit(`worktree kept: ${got.skipped}`);
+			else emit(`worktree reclaimed (${humanBytes(got.bytes)}) — no commits to preserve`);
 		}
 	}
 
