@@ -1,26 +1,32 @@
 import { createReadOnlyTools } from "@earendil-works/pi-coding-agent";
-import { Agent, getEnvApiKey, getModel, streamFn, type AgentEvent, type AgentMessage, type AgentTool, type AssistantMessage } from "./pi.js";
-import { resolve } from "node:path";
+import { Agent, getEnvApiKey, getModel, streamFn, type AgentEvent, type AgentMessage, type AgentTool } from "./pi.js";
+import { basename, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Type } from "typebox";
 import chalk from "chalk";
 import { cmuxOpenBrowser, cmuxOpenDiff, hasCmuxPassword, insideCmux } from "./cmux.js";
-import { loadMissions } from "./dashboard.js";
 import { runMission } from "./mission.js";
 import { autoRouting } from "./models.js";
+import { readActive } from "./registry.js";
+import { dispatchScouts, loadAgentSpecs } from "./subagent.js";
+import { listWorkspaces, registerWorkspace, resolveWorkspace, workspaceNames } from "./workspaces.js";
 import type { MissionConfig } from "./types.js";
 
-const SYSTEM_PROMPT = `You are the CHIEF OF STAFF for a solo founder-engineer. You run an org of coding agents against the current repository.
+const SYSTEM_PROMPT = `You are the CHIEF OF STAFF for a solo founder-engineer. You run an org of coding agents across ALL of their repositories.
 The user talks to you casually — never interrogate them with a form or a list of questions.
+
+Workspaces:
+- You are NOT limited to one repo. Every tool takes an optional "repo" (a short name like "nadine", or a path). Omit it to use the repo the user is currently attached from.
+- Call list_workspaces when you need to know what exists, or when the user names a repo you cannot place.
+- Missions in different repos run concurrently and land on their own branches, so "fix X in nadine and Y in missions" is one exchange, not two sessions.
 
 How to behave:
 - Infer intent. Propose a crisp plan in 1-2 lines. When the ask is clear, call run_mission to dispatch a worker — it runs in the BACKGROUND, so say you've kicked it off and keep talking.
-- Missions run in PARALLEL, each in its own git worktree (a few at once). You can dispatch several different pieces of work concurrently (e.g. script-gen, video-gen, captions).
-- Ask a clarifying question ONLY when you truly cannot proceed. One question, never a checklist.
-- You can read the repo (read-only tools) to ground yourself and answer "what should I work on".
+- Missions run in PARALLEL, each in its own git worktree (a few at once). Dispatch several pieces of work concurrently.
+- Ask a clarifying question ONLY when you truly cannot proceed. One question, never a checklist. The exception: if you cannot tell WHICH repo the user means, ask — dispatching into the wrong repo is expensive to undo.
+- You can read the current repo directly (read/grep/find/ls). For any OTHER repo, use investigate — it sends read-only scouts and returns their answers without filling your context.
 - Keep every reply short and skimmable. No walls of text.
-- When a mission finishes you'll get a "[mission-complete]" note — relay the result to the user in 2-3 lines and remind them the review opened in cmux.
-- Use open_dashboard when they want to see everything at once.
+- When a mission finishes you'll get a "[mission-complete]" note — relay the result in 2-3 lines and say which repo it was. Report ONLY what the note says: if it does not say a review opened, do not claim one did.
 
 Be a fast, direct teammate. Default to action.`;
 
@@ -52,16 +58,21 @@ function reviewInCmux(cwd: string, reportPath?: string, baseSha?: string): strin
 	return okReport || okDiff ? " Review opened in cmux (report + diff)." : "";
 }
 
-/** Parallel background mission runner: each mission runs in its own worktree; keeps the chat responsive. */
+interface Job {
+	repo: string;
+	goal: string;
+	rfc: string;
+	maxFeatures: number;
+}
+
+/** Parallel background mission runner: each mission runs in its own worktree, in whichever repo it targets. */
 class MissionRunner {
-	private queue: Array<{ goal: string; rfc: string; maxFeatures: number }> = [];
+	private queue: Job[] = [];
 	private active = 0;
 	private readonly cap = 3;
-	private readonly cwd: string;
 	private readonly notify: (text: string) => void;
 	private readonly log: (text: string) => void;
-	constructor(cwd: string, notify: (text: string) => void, log: (text: string) => void) {
-		this.cwd = cwd;
+	constructor(notify: (text: string) => void, log: (text: string) => void) {
 		this.notify = notify;
 		this.log = log;
 	}
@@ -70,7 +81,7 @@ class MissionRunner {
 		return this.active;
 	}
 
-	enqueue(job: { goal: string; rfc: string; maxFeatures: number }): { startedNow: boolean; active: number } {
+	enqueue(job: Job): { startedNow: boolean; active: number } {
 		const startedNow = this.active < this.cap;
 		this.queue.push(job);
 		this.pump();
@@ -89,10 +100,11 @@ class MissionRunner {
 		}
 	}
 
-	private async runOne(job: { goal: string; rfc: string; maxFeatures: number }): Promise<void> {
-		const config = configFor(this.cwd, job.goal, job.rfc, job.maxFeatures);
-		const tag = job.goal.length > 24 ? `${job.goal.slice(0, 24)}…` : job.goal;
-		this.log(chalk.dim(`\n  ▶ mission started: ${job.goal}\n`));
+	private async runOne(job: Job): Promise<void> {
+		const config = configFor(job.repo, job.goal, job.rfc, job.maxFeatures);
+		const repoName = basename(job.repo);
+		const tag = `${repoName}:${job.goal.length > 20 ? `${job.goal.slice(0, 20)}…` : job.goal}`;
+		this.log(chalk.dim(`\n  ▶ mission started in ${repoName}: ${job.goal}\n`));
 		try {
 			const state = await runMission(config, (e) => {
 				if (e.type === "status") this.log(chalk.dim(`  ▸ [${tag}] ${e.status}\n`));
@@ -100,33 +112,44 @@ class MissionRunner {
 					this.log(chalk.dim(`  · [${tag}] ${e.message}\n`));
 			});
 			const sc = state.scoreCard;
-			const review = reviewInCmux(state.worktreePath ?? this.cwd, state.reportPath, state.baseSha);
+			const review = reviewInCmux(state.worktreePath ?? job.repo, state.reportPath, state.baseSha);
 			this.notify(
-				`[mission-complete] "${job.goal}" → ${state.status}; ` +
+				`[mission-complete] ${repoName}: "${job.goal}" → ${state.status}; ` +
 					`${sc ? `${sc.assertionsPassed}/${sc.assertionsTotal} assertions, ${sc.bugs.length} bug(s)` : "no scorecard"}; ` +
 					`$${state.costUsd.toFixed(3)}.${review}`,
 			);
 		} catch (err) {
-			this.notify(`[mission-complete] "${job.goal}" FAILED: ${err instanceof Error ? err.message : String(err)}`);
+			this.notify(`[mission-complete] ${repoName}: "${job.goal}" FAILED: ${err instanceof Error ? err.message : String(err)}`);
 		}
 	}
 }
 
-function buildTools(targetCwd: string, runner: () => MissionRunner): AgentTool[] {
+const REPO_PARAM = Type.Optional(Type.String({ description: "Repo name (e.g. 'nadine') or path. Omit for the repo the user is attached from." }));
+
+/** "I don't know that repo" — same answer everywhere, so the chief never guesses. */
+function unknownRepo(ref: string): { content: { type: "text"; text: string }[] } {
+	return { content: [{ type: "text", text: `No workspace matches "${ref}" (or it is ambiguous). Known: ${workspaceNames()}. Ask the user which one, or pass a full path.` }] };
+}
+
+function buildTools(focus: () => string, runner: () => MissionRunner): AgentTool[] {
 	const runMissionTool = {
 		name: "run_mission",
 		label: "run mission",
-		description: "Dispatch a coding worker (runs in the background, in its own worktree) to make + validate a change. Use once the goal is clear.",
+		description: "Dispatch a coding worker (runs in the background, in its own worktree) to make + validate a change in any repo. Use once the goal is clear.",
 		parameters: Type.Object({
 			goal: Type.String({ description: "One-line goal." }),
 			rfc: Type.Optional(Type.String({ description: "Optional detail: what's wrong / what you want." })),
 			maxFeatures: Type.Optional(Type.Number({ description: "Features this run (default 1)." })),
+			repo: REPO_PARAM,
 		}),
-		async execute(_id: string, params: { goal: string; rfc?: string; maxFeatures?: number }) {
-			const { startedNow, active } = runner().enqueue({ goal: params.goal, rfc: params.rfc ?? "", maxFeatures: params.maxFeatures ?? 1 });
+		async execute(_id: string, params: { goal: string; rfc?: string; maxFeatures?: number; repo?: string }) {
+			const ws = resolveWorkspace(params.repo, focus());
+			if (!ws) return unknownRepo(params.repo ?? "");
+			registerWorkspace(ws.path);
+			const { startedNow, active } = runner().enqueue({ repo: ws.path, goal: params.goal, rfc: params.rfc ?? "", maxFeatures: params.maxFeatures ?? 1 });
 			const text = startedNow
-				? `Started "${params.goal}" in its own worktree (${active} running). I'll report when it's done — keep talking or dispatch more.`
-				: `Queued "${params.goal}" — ${active} already running (cap 3); it'll start as a slot frees.`;
+				? `Started "${params.goal}" in ${ws.name} (own worktree; ${active} running). I'll report when it's done — keep talking or dispatch more.`
+				: `Queued "${params.goal}" for ${ws.name} — ${active} already running (cap 3); it'll start as a slot frees.`;
 			return { content: [{ type: "text", text }] };
 		},
 	} as unknown as AgentTool;
@@ -134,15 +157,70 @@ function buildTools(targetCwd: string, runner: () => MissionRunner): AgentTool[]
 	const listTool = {
 		name: "list_missions",
 		label: "list missions",
-		description: "List recent missions and their status in this repo.",
-		parameters: Type.Object({}),
-		async execute() {
-			const missions = loadMissions(targetCwd).slice(0, 10);
-			if (!missions.length) return { content: [{ type: "text", text: "No missions yet." }] };
-			const text = missions
-				.map((m) => `- [${m.status}] ${m.goal} (${m.scoreCard ? `${m.scoreCard.assertionsPassed}/${m.scoreCard.assertionsTotal}` : "—"}, $${m.costUsd.toFixed(2)})`)
+		description: "List recent missions and their status. Covers every repo unless you name one.",
+		parameters: Type.Object({ repo: REPO_PARAM }),
+		async execute(_id: string, params: { repo?: string }) {
+			let records = readActive();
+			if (params.repo) {
+				const ws = resolveWorkspace(params.repo, focus());
+				if (!ws) return unknownRepo(params.repo);
+				records = records.filter((r) => r.repo === ws.path);
+			}
+			if (!records.length) return { content: [{ type: "text", text: params.repo ? `No missions in ${params.repo} yet.` : "No missions yet." }] };
+			const text = records
+				.slice(0, 20)
+				.map((r) => `- [${r.repoName}] [${r.status}${r.verdict ? `/${r.verdict}` : ""}] ${r.goal} ($${(r.costUsd ?? 0).toFixed(2)}${r.cleared ? ", cleared" : ""})`)
 				.join("\n");
 			return { content: [{ type: "text", text }] };
+		},
+	} as unknown as AgentTool;
+
+	const workspacesTool = {
+		name: "list_workspaces",
+		label: "list workspaces",
+		description: "List every repo this org knows about, with how much is running or waiting in each. Use before dispatching into a repo you cannot place.",
+		parameters: Type.Object({}),
+		async execute() {
+			const records = readActive();
+			const list = listWorkspaces();
+			if (!list.length) return { content: [{ type: "text", text: "No workspaces registered yet — only the repo the user is attached from." }] };
+			const here = focus();
+			const text = list
+				.map((w) => {
+					const mine = records.filter((r) => r.repo === w.path);
+					const running = mine.filter((r) => !r.done).length;
+					const waiting = mine.filter((r) => r.done && !r.cleared).length;
+					const bits = [running ? `${running} running` : "", waiting ? `${waiting} need review` : ""].filter(Boolean).join(", ");
+					return `- ${w.name}${w.path === here ? " (current)" : ""} — ${w.path}${bits ? ` — ${bits}` : ""}`;
+				})
+				.join("\n");
+			return { content: [{ type: "text", text }] };
+		},
+	} as unknown as AgentTool;
+
+	const investigateTool = {
+		name: "investigate",
+		label: "investigate",
+		description:
+			"Send read-only scouts into any repo and get their answers back. Each scout has its own context, so their reading does not consume yours. " +
+			"This is how you look inside a repo other than the one the user is attached from. Scouts CANNOT edit or run commands — dispatch a mission for that.",
+		parameters: Type.Object({
+			questions: Type.Array(Type.String({ description: "One self-contained question. The scout sees no other context." }), { description: "1-4 independent questions, answered concurrently." }),
+			repo: REPO_PARAM,
+		}),
+		async execute(_id: string, params: { questions: string[]; repo?: string }) {
+			const ws = resolveWorkspace(params.repo, focus());
+			if (!ws) return unknownRepo(params.repo ?? "");
+			const questions = (params.questions ?? []).filter((q) => q?.trim());
+			if (!questions.length) return { content: [{ type: "text", text: "No questions given." }] };
+			const results = await dispatchScouts({
+				cwd: ws.path,
+				specs: loadAgentSpecs(ws.path),
+				tasks: questions.map((task) => ({ agent: "scout", task })),
+			});
+			const text = results.map((r) => (r.ok ? `## ${r.task}\n${r.output}` : `## ${r.task}\nFAILED — ${r.error ?? "unknown"}`)).join("\n\n");
+			const spent = results.reduce((n, r) => n + r.costUsd, 0);
+			return { content: [{ type: "text", text: `${text}\n\n_(${ws.name}, ${results.length} scout(s), $${spent.toFixed(4)})_` }] };
 		},
 	} as unknown as AgentTool;
 
@@ -152,16 +230,19 @@ function buildTools(targetCwd: string, runner: () => MissionRunner): AgentTool[]
 		description: "Tell the user how to open the live mission-control board. Use when they ask to 'see the board' or a live view.",
 		parameters: Type.Object({}),
 		async execute() {
-			return { content: [{ type: "text", text: "Run `missions board` in a terminal tab for the live TUI — every running mission, what it's doing now, ↑↓ to select, ⏎ to jump into its worktree." }] };
+			return { content: [{ type: "text", text: "The board is the right-hand pane — Tab to focus it. It shows every repo: ↑↓ to select, ⏎ to open the report, a to merge." }] };
 		},
 	} as unknown as AgentTool;
 
-	return [...createReadOnlyTools(targetCwd), runMissionTool, listTool, boardTool];
+	// Direct read tools follow the focus repo; everything else takes a repo argument.
+	return [...createReadOnlyTools(focus()), runMissionTool, listTool, workspacesTool, investigateTool, boardTool];
 }
 
 export interface ChiefSession {
 	/** Feed a user line to the chief. */
 	input(text: string): void;
+	/** Point the chief at the repo a terminal is attached from. */
+	setFocus(cwd: string): void;
 	/** Register an output listener (raw text incl. ANSI). Returns an unsubscribe fn. */
 	subscribe(cb: (text: string) => void): () => void;
 	/** The intro banner. */
@@ -172,10 +253,15 @@ export interface ChiefSession {
 }
 
 /** Create the chief-of-staff brain, decoupled from any specific terminal. The daemon and the local REPL both drive this. */
-export function createChiefSession(targetCwd: string): ChiefSession {
+export function createChiefSession(homeCwd: string): ChiefSession {
 	const spec = autoRouting().orchestrator;
 	const model = getModel(spec.provider, spec.modelId);
 	if (!model) throw new Error(`Chief model not found: ${spec.provider}/${spec.modelId}`);
+
+	registerWorkspace(homeCwd);
+	let focus = homeCwd;
+	/** Set when focus moved since the last thing the user said, so the chief is told exactly once. */
+	let focusAnnounced = true;
 
 	const listeners = new Set<(text: string) => void>();
 	const emit = (text: string): void => {
@@ -184,7 +270,7 @@ export function createChiefSession(targetCwd: string): ChiefSession {
 
 	let runnerRef: MissionRunner;
 	const agent = new Agent({
-		initialState: { systemPrompt: SYSTEM_PROMPT, model, thinkingLevel: "off", tools: buildTools(targetCwd, () => runnerRef) },
+		initialState: { systemPrompt: SYSTEM_PROMPT, model, thinkingLevel: "off", tools: buildTools(() => focus, () => runnerRef) },
 		streamFn,
 		getApiKey: (provider) => getEnvApiKey(provider),
 	});
@@ -202,23 +288,47 @@ export function createChiefSession(targetCwd: string): ChiefSession {
 		}
 	}
 	function send(text: string): void {
+		// A focus change is context, not a turn of its own — it rides along with the
+		// next thing the user actually says, where it is read rather than answered.
+		const body = focusAnnounced ? text : `[context] The user is now attached from the repo "${basename(focus)}" (${focus}). Default to it unless they name another.\n\n${text}`;
+		focusAnnounced = true;
 		if (busy || agent.state.isStreaming) {
-			agent.followUp(userMsg(text));
+			agent.followUp(userMsg(body));
 			emit(chalk.dim("  (queued — chief is working)\n"));
 		} else {
-			void runTurn(userMsg(text));
+			void runTurn(userMsg(body));
 		}
 	}
-	runnerRef = new MissionRunner(targetCwd, send, emit);
+	runnerRef = new MissionRunner(send, emit);
 
+	// Stream the reply as it is generated. Waiting for message_end meant a reply
+	// landed as one block after several seconds of a still screen, which reads as
+	// a hang — the one thing a chat pane must never do.
+	let midLine = false;
+	const endLine = (): void => {
+		if (midLine) {
+			emit("\n");
+			midLine = false;
+		}
+	};
 	agent.subscribe((event: AgentEvent) => {
-		if (event.type === "message_end" && event.message.role === "assistant") {
-			const msg = event.message as AssistantMessage;
-			const parts = msg.content as Array<{ type: string; text?: string }>;
-			const text = parts.filter((c) => c.type === "text").map((c) => c.text ?? "").join("\n").trim();
-			if (text) emit(`\n${chalk.bold.cyan("chief")} ${text}\n`);
+		if (event.type === "message_update") {
+			const ev = event.assistantMessageEvent as { type: string; delta?: string };
+			if (ev.type === "text_start") {
+				emit(`\n${chalk.bold.cyan("chief")} `);
+				midLine = true;
+			} else if (ev.type === "text_delta" && ev.delta) {
+				emit(ev.delta);
+				midLine = true;
+			} else if (ev.type === "text_end") {
+				endLine();
+			}
 		} else if (event.type === "tool_execution_start") {
+			endLine();
 			emit(chalk.dim(`  · ${event.toolName}\n`));
+		} else if (event.type === "message_end") {
+			// Belt and braces: an aborted stream never emits text_end.
+			endLine();
 		}
 	});
 
@@ -227,14 +337,27 @@ export function createChiefSession(targetCwd: string): ChiefSession {
 			const t = text.trim();
 			if (t) send(t);
 		},
+		setFocus(cwd: string) {
+			const full = resolve(cwd);
+			if (full === focus) return;
+			focus = full;
+			focusAnnounced = false;
+			registerWorkspace(full);
+			// Read tools are bound to a cwd at construction, so they are rebuilt to follow.
+			agent.state.tools = buildTools(() => focus, () => runnerRef);
+			emit(chalk.dim(`  · focus → ${basename(full)}\n`));
+		},
 		subscribe(cb) {
 			listeners.add(cb);
 			return () => listeners.delete(cb);
 		},
 		greeting() {
+			const others = listWorkspaces().filter((w) => w.path !== focus).length;
 			return (
-				`${chalk.bold("☀  missions")} — chief of staff for ${chalk.dim(targetCwd)}\n` +
-				chalk.dim(`Talk to me. Missions run in the background (persist across tabs). "dashboard" · "what's going on?" · Ctrl-D detaches.\n`)
+				`${chalk.bold("☀  missions")} — chief of staff, focused on ${chalk.dim(basename(focus))}` +
+				(others ? chalk.dim(` (+${others} other repo${others === 1 ? "" : "s"})`) : "") +
+				"\n" +
+				chalk.dim(`Talk to me. Name any repo and I'll work there. Missions run in the background. "what's going on?" · Ctrl-C detaches.\n`)
 			);
 		},
 		activeMissions() {

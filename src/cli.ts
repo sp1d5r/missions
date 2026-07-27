@@ -10,8 +10,9 @@ import { runControl } from "./control.js";
 import { generateBriefing } from "./briefing.js";
 import { generateChangelog } from "./changelog.js";
 import { missionDebrief, renderBriefing } from "./diagram-text.js";
-import { runDaemon } from "./daemon.js";
+import { runDaemon, stopOrg } from "./daemon.js";
 import { runMission } from "./mission.js";
+import { forgetWorkspace, listWorkspaces, registerWorkspace } from "./workspaces.js";
 import { autoRouting } from "./models.js";
 import { StateStore } from "./state.js";
 import { runBoardTui } from "./tui.js";
@@ -35,6 +36,8 @@ interface Flags {
 	open: boolean;
 	help: boolean;
 	socket?: string;
+	/** Non-flag arguments after the command, e.g. `missions forget nadine`. */
+	args: string[];
 }
 
 function parseArgs(argv: string[]): Flags {
@@ -50,6 +53,7 @@ function parseArgs(argv: string[]): Flags {
 		maxVideos: 4,
 		open: false,
 		help: false,
+		args: [],
 	};
 	const rest = f.cmd === argv[0] ? argv.slice(1) : argv;
 	for (let i = 0; i < rest.length; i++) {
@@ -77,6 +81,7 @@ function parseArgs(argv: string[]): Flags {
 		else if (a === "--generic") f.targetKind = "generic";
 		else if (a === "--open") f.open = true;
 		else if (a.startsWith("-")) throw new Error(`Unknown flag: ${a}`);
+		else f.args.push(a);
 	}
 	return f;
 }
@@ -86,6 +91,9 @@ function help(): void {
 
 Usage:
   missions [--target <repo>]                     Mission control: chat with the chief (left) + live board (right). Tab switches focus.
+  missions repos                                 List every repo the org knows about
+  missions forget <name>                         Drop a repo from the org (e.g. a throwaway sandbox)
+  missions stop                                  Stop the org (running missions are abandoned)
   missions peek [--target <repo>]                Read-only board TUI, no chief attached (quick glance)
   missions attach [--target <repo>]              Text-only chief chat, no board pane (dumb terminals)
   missions run --target <repo> --goal "..." [--rfc @file|text] [flags]   Non-interactive single mission
@@ -146,6 +154,7 @@ function openFile(path: string): void {
 }
 
 async function runOne(config: MissionConfig, open: boolean): Promise<void> {
+	registerWorkspace(config.targetCwd);
 	process.stdout.write(
 		`${chalk.bold("mission")} → ${chalk.dim(config.targetCwd)} [${config.target}] budget $${config.budgetUsd} · ${config.routing.worker.provider}:${config.routing.worker.modelId}\n\n`,
 	);
@@ -220,6 +229,29 @@ async function main(): Promise<void> {
 			onProgress: (m) => process.stdout.write(`  ${chalk.dim(m)}\n`),
 		});
 		process.stdout.write(`${renderBriefing(b).join("\n")}\n`);
+		return;
+	}
+
+	if (f.cmd === "repos") {
+		// Registering here means `missions repos` in a new checkout also adopts it.
+		registerWorkspace(f.target);
+		for (const w of listWorkspaces()) {
+			process.stdout.write(`${w.path === resolve(f.target) ? chalk.bold("▸") : " "} ${chalk.bold(w.name.padEnd(18))} ${chalk.dim(w.path)}\n`);
+		}
+		return;
+	}
+
+	if (f.cmd === "forget") {
+		const ref = f.args[0] ?? f.goal;
+		if (!ref) throw new Error("forget requires a repo: missions forget <name-or-path>");
+		const gone = forgetWorkspace(ref);
+		process.stdout.write(gone ? `${chalk.bold("forgot")} ${gone.name} ${chalk.dim(gone.path)}\n` : chalk.yellow(`no workspace matches "${ref}"\n`));
+		return;
+	}
+
+	if (f.cmd === "stop") {
+		const n = stopOrg();
+		process.stdout.write(n ? `${chalk.bold("stopped")} ${n} org process(es)\n` : chalk.dim("no org running\n"));
 		return;
 	}
 

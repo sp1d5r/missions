@@ -5,14 +5,17 @@ import { emitKeypressEvents } from "node:readline";
 import chalk from "chalk";
 import { cmuxOpenBrowser, cmuxOpenWorkspace, hasCmuxPassword, insideCmux } from "./cmux.js";
 import { mergeBranch, removeWorktree } from "./git.js";
-import { daemonExists, drainFrames, encode, socketPathFor } from "./ipc.js";
+import { daemonExists, drainFrames, encode, orgSocketPath } from "./ipc.js";
 import { type ActiveRecord, readActive, updateActive } from "./registry.js";
 import { generateSuggestions, loadSuggestions, type Suggestion } from "./suggest.js";
 import { buildItems, type Item, milestoneLabel, money, outcomeColor, outcomeKind, outcomeSymbol, verdictLabel } from "./tui.js";
+import { registerWorkspace } from "./workspaces.js";
 
 const ESC = "\x1b";
 const ANSI = /\x1b\[[0-9;]*m/g;
 const RESET = "\x1b[0m";
+/** Text a keypress may contribute to the composer — one typed char, or a whole paste. */
+const PRINTABLE = /^[^\x00-\x1f\x7f]+$/;
 
 function visLen(s: string): number {
 	return s.replace(ANSI, "").length;
@@ -98,8 +101,8 @@ function wrapAnsi(line: string, width: number): string[] {
 	return out;
 }
 
-/** Render the right-hand board pane. */
-function boardPane(items: Item[], selected: number, focused: boolean, w: number, now: number): string[] {
+/** Render the right-hand board pane. `showRepo` tags each row once more than one repo is in play. */
+function boardPane(items: Item[], selected: number, focused: boolean, w: number, now: number, showRepo: boolean): string[] {
 	const lines: string[] = [];
 	let lastKind: string | null = null;
 	items.forEach((item, i) => {
@@ -112,8 +115,9 @@ function boardPane(items: Item[], selected: number, focused: boolean, w: number,
 		const sel = focused && i === selected;
 		let text: string;
 		let meta = "";
+		const repo = showRepo ? chalk.dim(`${item.kind === "suggest" ? item.sug.repoName : item.rec.repoName} `) : "";
 		if (item.kind === "suggest") {
-			text = `${chalk.dim("•")} ${item.sug.goal}`;
+			text = `${chalk.dim("•")} ${repo}${item.sug.goal}`;
 		} else {
 			const r = item.rec;
 			const parts = [milestoneLabel(r), money(r.costUsd)].filter(Boolean);
@@ -124,7 +128,7 @@ function boardPane(items: Item[], selected: number, focused: boolean, w: number,
 				parts.unshift(verdictLabel(r));
 			}
 			meta = chalk.dim(parts.join(" · "));
-			text = `${outcomeColor(r)(outcomeSymbol(r))} ${r.goal}`;
+			text = `${outcomeColor(r)(outcomeSymbol(r))} ${repo}${r.goal}`;
 		}
 		// Right-align the metadata so the column scans vertically.
 		const room = w - 2;
@@ -178,7 +182,12 @@ export interface ControlFrameState {
 	spin: number;
 	targetCwd: string;
 	now: number;
+	/** Tag board rows with their repo — only worth the columns once more than one is in play. */
+	showRepo: boolean;
 }
+
+/** How tall the composer may grow before it scrolls instead. */
+const COMPOSER_MAX_ROWS = 6;
 
 /**
  * Compose the framed console. Pure — testable without a TTY or a daemon.
@@ -197,10 +206,19 @@ export function composeControlFrame(s: ControlFrameState): { rows: string[]; cur
 	const Lw = Math.max(24, Math.floor(inner * 0.56));
 	const Rw = Math.max(18, inner - Lw);
 	const bodyH = Math.max(4, s.height - 2); // top edge + bottom edge
-	const chatH = bodyH - 1; // last body row is the composer
+
+	// The composer grows upward as you type. A one-row composer truncated anything
+	// past the pane width, so a long message became invisible as you wrote it and
+	// the cursor walked off the frame — you were typing blind into a box.
+	const composerAll =
+		s.mode === "chat" ? wrapAnsi(`${chalk.bold("›")} ${s.buffer}`, Lw) : [chalk.dim("[Tab to type to the chief]")];
+	const composerH = Math.min(composerAll.length, Math.max(1, Math.min(COMPOSER_MAX_ROWS, bodyH - 2)));
+	// Keep the tail — that is where the cursor is.
+	const composer = composerAll.slice(-composerH);
+	const chatH = bodyH - composerH;
 
 	const left = chatPane(s.transcript, Lw, chatH);
-	const right = boardPane(s.items, s.selected, s.mode === "board", Rw, s.now);
+	const right = boardPane(s.items, s.selected, s.mode === "board", Rw, s.now, s.showRepo);
 
 	const needs = s.items.filter((i) => i.kind === "review").length;
 	const run = s.items.filter((i) => i.kind === "running").length;
@@ -230,8 +248,9 @@ export function composeControlFrame(s: ControlFrameState): { rows: string[]; cur
 	}
 
 	// The composer sits inside the left pane, so the frame makes it obvious where typing lands.
-	const composer = s.mode === "chat" ? `${chalk.bold("›")} ${s.buffer}` : D("[Tab to type to the chief]");
-	rows.push(`${D("│")} ${padVis(composer, Lw)} ${D("│")} ${padVis(right[chatH] ?? "", Rw)} ${D("│")}`);
+	for (let y = 0; y < composerH; y++) {
+		rows.push(`${D("│")} ${padVis(composer[y] ?? "", Lw)} ${D("│")} ${padVis(right[chatH + y] ?? "", Rw)} ${D("│")}`);
+	}
 
 	const spinner = s.busy ? `${"⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[s.spin % 10]} ` : "";
 	const status = s.busy
@@ -240,8 +259,9 @@ export function composeControlFrame(s: ControlFrameState): { rows: string[]; cur
 	const hint = D(s.mode === "chat" ? "Tab → board" : "Tab → chat · q quit");
 	rows.push(D("└─") + seg(status, Lw + 1) + D("┴─") + seg(hint, Rw + 1) + D("┘"));
 
-	// Composer is the last body row; its content starts 4 columns in ("│ › ").
-	return { rows, cursorRow: bodyH + 1, cursorCol: 5 };
+	// Terminal rows are 1-based: top edge is row 1, body row i is row 2+i. The cursor
+	// sits after the last composer line, whose content starts at column 3 ("│ ").
+	return { rows, cursorRow: bodyH + 1, cursorCol: 3 + visLen(composer[composerH - 1] ?? "") };
 }
 
 function tryConnect(socketPath: string): Promise<Socket | null> {
@@ -268,9 +288,19 @@ function spawnDaemon(targetCwd: string, socketPath: string): void {
 	child.unref();
 }
 
-async function ensureConnected(targetCwd: string, socketPath: string): Promise<Socket> {
+/**
+ * Attach to the org, starting it if nobody has yet.
+ *
+ * `hello` is what makes this multi-repo: the daemon has no cwd of its own, so the
+ * client tells it which repo this terminal is sitting in and the chief focuses there.
+ */
+export async function ensureConnected(targetCwd: string, socketPath: string): Promise<Socket> {
+	const hello = (sock: Socket): Socket => {
+		sock.write(encode({ t: "hello", text: targetCwd }));
+		return sock;
+	};
 	let sock = await tryConnect(socketPath);
-	if (sock) return sock;
+	if (sock) return hello(sock);
 	if (!daemonExists(socketPath)) {
 		process.stdout.write(chalk.dim("starting the org (daemon)…\n"));
 		spawnDaemon(targetCwd, socketPath);
@@ -278,7 +308,7 @@ async function ensureConnected(targetCwd: string, socketPath: string): Promise<S
 	for (let i = 0; i < 40; i++) {
 		await new Promise((r) => setTimeout(r, 150));
 		sock = await tryConnect(socketPath);
-		if (sock) return sock;
+		if (sock) return hello(sock);
 		if (i === 6 && !daemonExists(socketPath)) spawnDaemon(targetCwd, socketPath);
 	}
 	throw new Error(`Could not reach the missions daemon at ${socketPath}`);
@@ -290,7 +320,8 @@ async function ensureConnected(targetCwd: string, socketPath: string): Promise<S
  * Tab switches focus between chat and board; board keys action the queue directly.
  */
 export async function runControl(targetCwd: string): Promise<void> {
-	const socketPath = socketPathFor(targetCwd);
+	registerWorkspace(targetCwd);
+	const socketPath = orgSocketPath();
 	const sock = await ensureConnected(targetCwd, socketPath);
 	const out = process.stdout;
 
@@ -318,6 +349,7 @@ export async function runControl(targetCwd: string): Promise<void> {
 	const draw = (): void => {
 		const its = items();
 		if (selected >= its.length) selected = Math.max(0, its.length - 1);
+		const repos = new Set(its.map((i) => (i.kind === "suggest" ? i.sug.repo : i.rec.repo)));
 		const { rows, cursorRow, cursorCol } = composeControlFrame({
 			width: out.columns ?? 100,
 			height: out.rows ?? 30,
@@ -331,14 +363,29 @@ export async function runControl(targetCwd: string): Promise<void> {
 			spin,
 			targetCwd,
 			now: Date.now(),
+			showRepo: repos.size > 1,
 		});
 
 		out.write("\x1b[H");
 		out.write(rows.map((l) => l + "\x1b[K").join("\r\n"));
 		out.write("\x1b[J");
 
-		if (mode === "chat") out.write(`\x1b[${cursorRow};${cursorCol + buffer.length}H\x1b[?25h`);
+		if (mode === "chat") out.write(`\x1b[${cursorRow};${cursorCol}H\x1b[?25h`);
 		else out.write("\x1b[?25l");
+	};
+
+	/**
+	 * Coalesce repaints. The chief now streams token by token, and a full-screen
+	 * redraw per delta is both wasteful and visibly torn — one frame per tick is
+	 * indistinguishable to a reader and costs a fraction as much.
+	 */
+	let pending: NodeJS.Timeout | undefined;
+	const scheduleDraw = (): void => {
+		if (pending) return;
+		pending = setTimeout(() => {
+			pending = undefined;
+			if (alive) draw();
+		}, 24);
 	};
 
 	const send = (text: string): void => {
@@ -432,6 +479,8 @@ export async function runControl(targetCwd: string): Promise<void> {
 		if (!alive) return;
 		alive = false;
 		clearInterval(timer);
+		if (pending) clearTimeout(pending);
+		process.stdout.removeListener("resize", onResize);
 		process.stdin.removeListener("keypress", onKey);
 		if (process.stdin.isTTY) process.stdin.setRawMode(false);
 		out.write("\x1b[?25h\x1b[?1049l");
@@ -439,7 +488,14 @@ export async function runControl(targetCwd: string): Promise<void> {
 		out.write(chalk.dim("detached — the org keeps running. Reattach any time with `missions`.\n"));
 	};
 
-	const onKey = (str: string, key: { name?: string; ctrl?: boolean; sequence?: string }): void => {
+	// Without this the frame keeps the old width until the next keystroke, which
+	// looks like the pane broke rather than that it has not been told yet.
+	const onResize = (): void => {
+		out.write("\x1b[2J");
+		draw();
+	};
+
+	const onKey = (str: string, key: { name?: string; ctrl?: boolean; meta?: boolean; sequence?: string }): void => {
 		if (!key) return;
 		if (key.ctrl && key.name === "c") return cleanup();
 		if (key.name === "tab") {
@@ -453,7 +509,9 @@ export async function runControl(targetCwd: string): Promise<void> {
 				buffer = "";
 				if (v) send(v);
 			} else if (key.name === "backspace") buffer = buffer.slice(0, -1);
-			else if (str && !key.ctrl && str.length === 1 && str >= " ") buffer += str;
+			// A pasted run of characters arrives as one keypress. Requiring length === 1
+			// silently dropped every paste, so anything long had to be retyped by hand.
+			else if (str && !key.ctrl && !key.meta && PRINTABLE.test(str)) buffer += str;
 		} else {
 			if (key.name === "escape") {
 				mode = "chat";
@@ -477,7 +535,7 @@ export async function runControl(targetCwd: string): Promise<void> {
 				touched = true;
 			}
 		}
-		if (touched) draw();
+		if (touched) scheduleDraw();
 	});
 	sock.on("close", () => {
 		if (alive) {
@@ -491,6 +549,7 @@ export async function runControl(targetCwd: string): Promise<void> {
 	if (process.stdin.isTTY) process.stdin.setRawMode(true);
 	process.stdin.resume();
 	process.stdin.on("keypress", onKey);
+	process.stdout.on("resize", onResize);
 	const timer = setInterval(() => {
 		spin++;
 		draw();

@@ -1,8 +1,8 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { missionsPath } from "./paths.js";
 
-const ACTIVE_DIR = join(homedir(), ".missions", "active");
+const ACTIVE_DIR = (): string => missionsPath("active");
 
 /** A cross-repo, live snapshot of one mission (written on every step). */
 export interface ActiveRecord {
@@ -30,13 +30,13 @@ export interface ActiveRecord {
 }
 
 export function writeActive(rec: ActiveRecord): void {
-	mkdirSync(ACTIVE_DIR, { recursive: true });
-	writeFileSync(join(ACTIVE_DIR, `${rec.id}.json`), JSON.stringify(rec, null, 2));
+	mkdirSync(ACTIVE_DIR(), { recursive: true });
+	writeFileSync(join(ACTIVE_DIR(), `${rec.id}.json`), JSON.stringify(rec, null, 2));
 }
 
 /** Patch a record in place (e.g. mark it cleared/merged from the board). No-op if it's gone. */
 export function updateActive(id: string, patch: Partial<ActiveRecord>): void {
-	const p = join(ACTIVE_DIR, `${id}.json`);
+	const p = join(ACTIVE_DIR(), `${id}.json`);
 	if (!existsSync(p)) return;
 	try {
 		const rec = JSON.parse(readFileSync(p, "utf-8")) as ActiveRecord;
@@ -47,12 +47,13 @@ export function updateActive(id: string, patch: Partial<ActiveRecord>): void {
 }
 
 export function readActive(): ActiveRecord[] {
-	if (!existsSync(ACTIVE_DIR)) return [];
+	const dir = ACTIVE_DIR();
+	if (!existsSync(dir)) return [];
 	const out: ActiveRecord[] = [];
-	for (const name of readdirSync(ACTIVE_DIR)) {
+	for (const name of readdirSync(dir)) {
 		if (!name.endsWith(".json")) continue;
 		try {
-			out.push(JSON.parse(readFileSync(join(ACTIVE_DIR, name), "utf-8")) as ActiveRecord);
+			out.push(JSON.parse(readFileSync(join(dir, name), "utf-8")) as ActiveRecord);
 		} catch {
 			/* skip */
 		}

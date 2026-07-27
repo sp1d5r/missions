@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { missionsPath, missionsRoot } from "./paths.js";
 import { complete, parseJson } from "./llm.js";
 import { autoRouting } from "./models.js";
 import { topLevelRecon } from "./target/generic.js";
@@ -14,13 +14,13 @@ export interface Suggestion {
 	source: string;
 }
 
-const CACHE = join(homedir(), ".missions", "suggestions.json");
+const CACHE = (): string => missionsPath("suggestions.json");
 type Cache = Record<string, { at: string; items: Suggestion[] }>;
 
 function readCache(): Cache {
-	if (!existsSync(CACHE)) return {};
+	if (!existsSync(CACHE())) return {};
 	try {
-		return JSON.parse(readFileSync(CACHE, "utf-8")) as Cache;
+		return JSON.parse(readFileSync(CACHE(), "utf-8")) as Cache;
 	} catch {
 		return {};
 	}
@@ -93,7 +93,7 @@ Propose the next missions now.`;
 
 	const cache = readCache();
 	cache[repo] = { at: new Date().toISOString(), items };
-	mkdirSync(join(homedir(), ".missions"), { recursive: true });
-	writeFileSync(CACHE, JSON.stringify(cache, null, 2));
+	mkdirSync(missionsRoot(), { recursive: true });
+	writeFileSync(CACHE(), JSON.stringify(cache, null, 2));
 	return items;
 }
