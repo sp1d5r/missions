@@ -130,9 +130,10 @@ export const THEME_CSS = `
   .exit-ok { color: ${THEME.textDim}; }
   .exit-bad { color: ${THEME.bad}; }
 
-  /* Diagrams are inline SVG, so they scroll rather than squash on a narrow screen. */
-  .diagram { border: 1px solid ${THEME.hairline}; background: ${THEME.panel}; padding: 10px 6px; }
-  .diagram svg { display: block; max-width: none; }
+  /* Diagrams are inline SVG laid out to a fixed canvas: full width up to that canvas,
+     scaling down below it rather than squashing or overflowing. */
+  .diagram { border: 1px solid ${THEME.hairline}; background: ${THEME.panel}; padding: 14px; }
+  .diagram svg { display: block; margin: 0 auto; }
   pre.src {
     background: ${THEME.panel}; border: 1px solid ${THEME.hairline};
     padding: 12px 14px; margin: 8px 0 0; overflow-x: auto;
