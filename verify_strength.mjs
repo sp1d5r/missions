@@ -213,6 +213,49 @@ check("(f2) skipped behavioural must NOT produce plain CLEAN (no suppression of 
   return v !== "CLEAN";
 });
 
+
+console.log("\n── env-prefix bug (bug 1) ──\n");
+
+// env FOO=1 test -f src/foo.ts  should be existence (env + VAR=val prefix skipped)
+check("(g1) env FOO=1 test -f src/foo.ts -> existence", () => {
+  return classifyCommandStrength("env FOO=1 test -f src/foo.ts") === "existence";
+});
+
+// Multiple VAR=val after env
+check("(g2) env FOO=1 BAR=2 test -f x -> existence", () => {
+  return classifyCommandStrength("env FOO=1 BAR=2 test -f x") === "existence";
+});
+
+// env with no assignments before a non-filesystem-only command stays behavioural
+check("(g3) env node app.js -> behavioural (node is not filesystem-only)", () => {
+  return classifyCommandStrength("env node app.js") === "behavioural";
+});
+
+// env with no assignments before a filesystem-only command -> existence
+check("(g4) env test -f x -> existence", () => {
+  return classifyCommandStrength("env test -f x") === "existence";
+});
+
+console.log("\n── backslash-continuation bug (bug 2) ──\n");
+
+// Multi-line filesystem check classifies identically to its single-line form
+check("(h1) backslash-continued filesystem check -> existence", () => {
+  const multiline = "test -f src/foo.ts \\\n  && grep -q pattern bar.ts";
+  return classifyCommandStrength(multiline) === "existence";
+});
+
+check("(h2) backslash-continued filesystem check equals single-line form", () => {
+  const multiline = "grep -rn \\\n  pattern \\\n  ./src";
+  const singleline = "grep -rn pattern ./src";
+  return classifyCommandStrength(multiline) === classifyCommandStrength(singleline);
+});
+
+// Only-downgrade: backslash-continued behavioural command stays behavioural
+check("(h3) backslash-continued behavioural command -> behavioural", () => {
+  const cmd = "node dist/cli.js \\\n  --flag";
+  return classifyCommandStrength(cmd) === "behavioural";
+});
+
 console.log("\n── Summary ──\n");
 const total = passed + failed;
 const allPass = failed === 0;
