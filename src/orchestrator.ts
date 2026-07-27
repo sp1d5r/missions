@@ -105,9 +105,12 @@ and what issues it discovered).
 Your job:
 1. ASSESS. What is the real state of the work? Where a worker CLAIMED an assertion the validators failed,
    say so plainly — that gap is the most important signal you have.
-2. RULE ON EVERY OPEN ISSUE. Each issue a worker raised must get "addressed" (a correction picks it up) or
-   "deferred" (with a reason it is safe to leave). You may not leave an issue unruled — the harness blocks
-   the mission if you do.
+2. RULE ON EVERY OPEN ISSUE. Each issue a worker raised must get exactly one disposition:
+   - "addressed": a correction IN THIS RESPONSE fixes it. You MUST name that correction in "correctionId".
+   - "deferred": nothing this mission will fix it — already handled, out of scope, or safe to leave. Say why in "note".
+   You may not leave an issue unruled, and you may not rule one "addressed" without naming the correction that
+   picks it up. The harness blocks the mission on both, because an issue nobody is dispatched to fix has not
+   been addressed, it has been dropped.
 3. SCOPE CORRECTIONS. Write corrective features for the next milestone, each small enough for one fresh
    worker with clean context. Target the failing assertions, the blocking bugs, and the issues you marked
    "addressed".
@@ -127,7 +130,8 @@ Output ONLY a JSON object, no prose:
   "assessment": "2-4 sentences: the real state, and any claimed-but-failed assertions",
   "verdict": "passed" | "needs-corrections" | "stalled",
   "issueRulings": [
-    { "summary": "must match the issue summary verbatim", "disposition": "addressed" | "deferred", "note": "why" }
+    { "summary": "must match the issue summary verbatim", "disposition": "addressed", "correctionId": "c1", "note": "why" },
+    { "summary": "must match the issue summary verbatim", "disposition": "deferred", "note": "why it is safe to leave" }
   ],
   "corrections": [
     { "id": "c1", "title": "short", "description": "what to change and where, precisely",
@@ -139,6 +143,8 @@ Output ONLY a JSON object, no prose:
 export interface CorrectionRuling {
 	summary: string;
 	disposition: IssueDisposition;
+	/** For "addressed": which correction picks it up. Checked by the boundary invariants. */
+	correctionId?: string;
 	note?: string;
 }
 
@@ -237,14 +243,22 @@ Assess, rule on the issues, and scope corrections now. At most ${config.maxFeatu
 
 	const validAssertionIds = new Set(assertions.map((a) => a.id));
 	const rawCorrections = Array.isArray(parsed.corrections) ? parsed.corrections : [];
+	// The orchestrator restarts its own numbering at every boundary, so a bare "c1" from
+	// milestone 3 would collide with milestone 2's "c1" in state.features. Namespacing is a
+	// clerical fix, not a judgement call, so the harness does it rather than stalling over it.
+	const prefix = `m${milestone + 1}`;
+	const idMap = new Map<string, string>();
 	const corrections: Feature[] = rawCorrections
 		.map((raw, i) => {
 			const f = raw as Partial<Feature>;
+			const givenId = typeof f.id === "string" && f.id.trim() ? f.id.trim() : `c${i + 1}`;
+			const id = givenId.startsWith(prefix) ? givenId : `${prefix}${givenId}`;
+			idMap.set(givenId, id);
 			return {
-				id: typeof f.id === "string" && f.id.trim() ? f.id : `m${milestone + 1}c${i + 1}`,
+				id,
 				title: typeof f.title === "string" && f.title.trim() ? f.title : `Correction ${i + 1}`,
 				description: typeof f.description === "string" ? f.description : "",
-				assertionIds: Array.isArray(f.assertionIds) ? f.assertionIds.filter((id) => validAssertionIds.has(id)) : [],
+				assertionIds: Array.isArray(f.assertionIds) ? f.assertionIds.filter((aid) => validAssertionIds.has(aid)) : [],
 				procedures: Array.isArray(f.procedures) ? f.procedures.filter((p) => typeof p === "string") : undefined,
 				addresses: Array.isArray(f.addresses) ? f.addresses.filter((a) => typeof a === "string") : undefined,
 				milestone: milestone + 1,
@@ -254,14 +268,25 @@ Assess, rule on the issues, and scope corrections now. At most ${config.maxFeatu
 		.filter((f) => f.description.trim().length > 0);
 
 	const rawRulings = Array.isArray(parsed.issueRulings) ? parsed.issueRulings : [];
-	const issueRulings: CorrectionRuling[] = rawRulings
-		.map((raw) => {
-			const r = raw as { summary?: unknown; disposition?: unknown; note?: unknown };
-			const summary = typeof r?.summary === "string" ? r.summary.trim() : "";
-			const disposition: IssueDisposition = r?.disposition === "deferred" ? "deferred" : "addressed";
-			return { summary, disposition, note: typeof r?.note === "string" ? r.note : undefined };
-		})
-		.filter((r) => r.summary.length > 0);
+	const issueRulings: CorrectionRuling[] = rawRulings.flatMap((raw): CorrectionRuling[] => {
+		const r = raw as { summary?: unknown; disposition?: unknown; correctionId?: unknown; note?: unknown };
+		const summary = typeof r?.summary === "string" ? r.summary.trim() : "";
+		// Closed value set. Anything else is dropped rather than guessed at: an unrecognised
+		// disposition coerced to "addressed" would close an issue nobody ruled on. Dropping
+		// leaves it open, which blocks the pass — the safe direction to fail in.
+		const disposition: IssueDisposition | undefined =
+			r?.disposition === "addressed" || r?.disposition === "deferred" ? r.disposition : undefined;
+		if (!summary || !disposition) return [];
+		const given = typeof r?.correctionId === "string" ? r.correctionId.trim() : "";
+		return [
+			{
+				summary,
+				disposition,
+				correctionId: given ? (idMap.get(given) ?? given) : undefined,
+				note: typeof r?.note === "string" ? r.note : undefined,
+			},
+		];
+	});
 
 	const verdict = parsed.verdict === "passed" || parsed.verdict === "stalled" ? parsed.verdict : "needs-corrections";
 

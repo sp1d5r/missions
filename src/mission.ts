@@ -3,7 +3,8 @@ import { applyEnvOverrides, bootstrapWorktree } from "./bootstrap.js";
 import { provisionDbBranch } from "./db-branch.js";
 import { resolveMissionEnv } from "./env.js";
 import { addWorktree, commitAll, diffAgainst, ensureBranch, headSha, isGitRepo } from "./git.js";
-import { planMission, scopeCorrections } from "./orchestrator.js";
+import { blocking, checkBoundary, checkPlan, formatViolations, warnings } from "./invariants.js";
+import { type CorrectionRuling, planMission, scopeCorrections } from "./orchestrator.js";
 import { writeActive, repoName } from "./registry.js";
 import { generateReport } from "./report.js";
 import { StateStore } from "./state.js";
@@ -119,6 +120,16 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 		store.state.costUsd += planCost;
 		store.save();
 		emit(`plan: ${plan.features.length} feature(s), ${plan.contract.assertions.length} assertion(s) — $${planCost.toFixed(3)}`);
+
+		// Gate the plan before a single worker is paid for. A contract that coerced away to
+		// nothing would otherwise score 0/0, and 0/0 has no failures, and no failures reads
+		// as CLEAN — the harness reporting success for a mission that proved nothing.
+		const planViolations = checkPlan(plan);
+		for (const w of warnings(planViolations)) emit(`  ⚠ [${w.invariant}] ${w.detail}`);
+		const planBlockers = blocking(planViolations);
+		if (planBlockers.length) {
+			throw new Error(`Plan violates ${planBlockers.length} harness invariant(s):\n${formatViolations(planBlockers)}`);
+		}
 
 		// Schema work is the one action a parallel worker can take that breaks every other tree
 		// at once, so it is the only thing we isolate. Everything else runs against the live
@@ -305,12 +316,46 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 
 			// Apply the rulings back onto the issues so the report shows what happened to each.
 			applyRulings(handoffs, review.issueRulings);
+
+			// Cap BEFORE checking, so the invariants see what will actually be dispatched rather
+			// than what was proposed. Corrections past the cap are dropped, and any issue that was
+			// ruled "addressed" by a dropped correction goes back to open — nothing is fixing it,
+			// so calling it addressed would close it on a promise the harness just cancelled.
+			const corrections = review.corrections.slice(0, config.maxFeatures);
+			const dropped = review.corrections.slice(config.maxFeatures);
+			if (dropped.length) {
+				const reopened = reopenIssuesFor(handoffs, dropped.map((c) => c.id));
+				emit(
+					`  ⚠ ${dropped.length} correction(s) over --max-features=${config.maxFeatures} dropped: ${dropped.map((c) => c.id).join(", ")}` +
+						(reopened ? ` — ${reopened} issue(s) reopened` : ""),
+				);
+			}
+
+			const violations = checkBoundary({
+				assertions: plan.contract.assertions,
+				scoreCard,
+				handoffs,
+				verdict: review.verdict,
+				corrections,
+				dispatchedFeatureIds: store.state.features.map((f) => f.id),
+			});
+			for (const w of warnings(violations)) emit(`  ⚠ [${w.invariant}] ${w.detail}`);
+			const blockers = blocking(violations);
+			if (blockers.length) {
+				verdict = "stalled";
+				record.verdict = verdict;
+				record.assessment = `${review.assessment}\n\n[harness] Boundary blocked by ${blockers.length} invariant violation(s):\n${formatViolations(blockers)}`;
+				store.state.milestones.push(record);
+				store.save();
+				emit(`milestone ${m}: STALLED — ${blockers.map((b) => b.invariant).join(", ")} — needs you`);
+				break;
+			}
+
 			const stillOpen = handoffs.flatMap((h) => h.issues.filter((i) => !i.disposition));
-			for (const i of stillOpen) emit(`  ⚑ UNRULED issue carried forward: ${i.summary}`);
 
 			// Evidence is green, every issue has been ruled, and the orchestrator is not asking for
-			// more work: that is a pass. Note this is decided on the evidence — a milestone cannot
-			// pass on the orchestrator's say-so alone (see the disagreement check below).
+			// more work: that is a pass. Decided on the evidence — a milestone cannot pass on the
+			// orchestrator's say-so alone; verdict.evidence-backed above is what enforces that.
 			if (clean && stillOpen.length === 0 && review.verdict !== "needs-corrections") {
 				verdict = "passed";
 				record.verdict = verdict;
@@ -320,18 +365,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 				break;
 			}
 
-			// The orchestrator says done, but validators or unruled issues disagree: the harness wins.
-			if (review.verdict === "passed" && (!clean || stillOpen.length > 0)) {
-				verdict = "stalled";
-				record.verdict = verdict;
-				record.assessment = `${review.assessment}\n\n[harness] Orchestrator declared "passed" but ${failing.length} assertion(s) still fail, ${blockingBugs.length} blocking bug(s) remain, and ${stillOpen.length} issue(s) are unruled. Blocked for a human.`;
-				store.state.milestones.push(record);
-				store.save();
-				emit(`milestone ${m}: orchestrator claimed done, evidence says otherwise — needs you`);
-				break;
-			}
-
-			if (review.verdict !== "needs-corrections" || review.corrections.length === 0) {
+			if (review.verdict !== "needs-corrections" || corrections.length === 0) {
 				verdict = "stalled";
 				record.verdict = verdict;
 				store.state.milestones.push(record);
@@ -340,7 +374,6 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 				break;
 			}
 
-			const corrections = review.corrections.slice(0, config.maxFeatures);
 			record.verdict = "corrections-scoped";
 			record.correctionIds = corrections.map((c) => c.id);
 			verdict = "corrections-scoped";
@@ -392,7 +425,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 }
 
 /** Stamp the orchestrator's dispositions onto the issues they refer to. Matches on summary. */
-function applyRulings(handoffs: Handoff[], rulings: { summary: string; disposition: "addressed" | "deferred"; note?: string }[]): void {
+function applyRulings(handoffs: Handoff[], rulings: CorrectionRuling[]): void {
 	if (!rulings.length) return;
 	const norm = (s: string) => s.trim().toLowerCase();
 	for (const h of handoffs) {
@@ -404,7 +437,28 @@ function applyRulings(handoffs: Handoff[], rulings: { summary: string; dispositi
 			if (hit) {
 				issue.disposition = hit.disposition;
 				issue.dispositionNote = hit.note;
+				issue.addressedBy = hit.disposition === "addressed" ? hit.correctionId : undefined;
 			}
 		}
 	}
+}
+
+/**
+ * Re-open issues whose nominated correction is not being dispatched. Returns how many.
+ * An open issue blocks the pass, which is exactly right: the work is still outstanding.
+ */
+function reopenIssuesFor(handoffs: Handoff[], droppedIds: string[]): number {
+	const gone = new Set(droppedIds);
+	let count = 0;
+	for (const h of handoffs) {
+		for (const issue of h.issues) {
+			if (issue.disposition === "addressed" && issue.addressedBy && gone.has(issue.addressedBy)) {
+				issue.disposition = undefined;
+				issue.dispositionNote = undefined;
+				issue.addressedBy = undefined;
+				count++;
+			}
+		}
+	}
+	return count;
 }

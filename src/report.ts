@@ -58,7 +58,9 @@ function handoffCard(h: Handoff): string {
 	const issues = h.issues.length
 		? `<div class="label" style="margin-top:10px">issues raised</div><ul class="log">${h.issues
 				.map((i) => {
-					const d = i.disposition ? tag(i.disposition === "addressed" ? "live" : "quiet", i.disposition) : tag("bad", "unruled");
+					// "addressed" is only meaningful with the correction that took it, so it is part of the tag.
+					const label = i.disposition === "addressed" && i.addressedBy ? `addressed → ${i.addressedBy}` : i.disposition;
+					const d = i.disposition ? tag(i.disposition === "addressed" ? "live" : "quiet", label ?? "") : tag("bad", "unruled");
 					return `<li>${esc(i.summary)} ${d}${i.detail ? `<div class="dim">${esc(i.detail)}</div>` : ""}${
 						i.dispositionNote ? `<div class="faint">→ ${esc(i.dispositionNote)}</div>` : ""
 					}</li>`;

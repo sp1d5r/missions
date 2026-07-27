@@ -121,7 +121,10 @@ export function missionFlowLines(state: MissionState, width: number): string[] {
 			out.push(`    ${flag} ${chalk.bold(h.featureId)}  ${fit(h.completed, width - 12)}`);
 			for (const u of h.leftUndone) out.push(`        ${chalk.yellow("↯")} ${chalk.yellow(fit(`left undone: ${u}`, width - 12))}`);
 			for (const issue of h.issues) {
-				const d = issue.disposition ? chalk.dim(`[${issue.disposition}]`) : chalk.red("[unruled]");
+				// Naming the correction is the whole point of "addressed" — show who took it.
+				const d = issue.disposition
+					? chalk.dim(`[${issue.disposition}${issue.addressedBy ? ` → ${issue.addressedBy}` : ""}]`)
+					: chalk.red("[unruled]");
 				out.push(`        ${chalk.yellow("⚑")} ${fit(issue.summary, width - 24)} ${d}`);
 			}
 			const failed = h.commands.filter((c) => c.exitCode !== 0);

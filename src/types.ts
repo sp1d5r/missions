@@ -116,8 +116,11 @@ export interface HandoffIssue {
 	detail?: string;
 	/** Assigned by the orchestrator at a milestone boundary. Undefined = still open, and blocks the milestone. */
 	disposition?: IssueDisposition;
-	/** Which correction picks it up, or why it is safe to defer. */
+	/** Why it was addressed or why it is safe to defer. */
 	dispositionNote?: string;
+	/** Id of the correction that picks it up. Required for "addressed" — an issue nothing
+	 *  is dispatched to fix has not been addressed, it has been dropped. */
+	addressedBy?: string;
 }
 
 /** Structured worker handoff. Free prose alone is not accepted. */
