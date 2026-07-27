@@ -134,11 +134,36 @@ by default, never prints a value, preserves keys that exist only locally. First 
 Not run because local values may be deliberate and it rewrites live credentials. It backs up
 first. Elijah's call.
 
-**2. Neon branching is built but inert.** `NEON_API_KEY` and `NEON_PROJECT_ID` exist nowhere —
-not `.env`, not SSM. Until they do, a migration-touching plan logs
-`⚠ database: … cannot branch the database. Migrations must NOT be applied in this mission.`
-and that warning goes into the worker's prompt. Add both to SSM and branching starts
-automatically, with teardown in the mission's `finally`.
+**2. Neon branching is LIVE and verified** (2026-07-27). `NEON_API_KEY` and `NEON_PROJECT_ID` are
+in the root `.env` and in SSM as `/nadine/neon_api_key` and `/nadine/neon_project_id` (both
+SecureString). Verified end-to-end against the real `nadeen` project: a schema-touching plan
+branches in ~1s, a non-schema plan correctly does not, teardown removes it in ~0.2s and leaves no
+orphan.
+
+No ECS service reads them yet — `ssm_loader.py` only fetches what a task definition lists in
+`ENVIRONMENT_VARS`, and nothing server-side references `NEON_` at all. Deliberate: the key can
+create and delete database branches, so when something does need it, add it to the **agent-runner**
+list (`infra/__main__.py:269`) rather than `BACKEND_ENV_VARS` — smaller blast radius than handing
+branch-delete powers to the public API service.
+
+Costs, measured rather than assumed (Launch plan: storage $0.35/GB-month, compute $0.106/CU-hour):
+
+| scenario | cost |
+|---|---|
+| branch torn down after 30 min @ 0.25 CU | **$0.013** |
+| storage delta (branch starts at 0 bytes vs a 15.3GB parent — copy-on-write) | ~$0.001/hour for a 2GB delta |
+| orphan with autosuspend working | ~$0.70/month |
+| orphan @ 0.25 CU never suspending | ~$19/month |
+| orphan @ 2 CU never suspending | ~$155/month |
+
+Storage is a non-issue; compute orphans are the whole risk. So `db-branch.ts` pins the endpoint's
+own limits instead of inheriting the project defaults (which handed out 0.25–**2** CU with an
+implicit idle timeout), and sweeps `missions/*` branches older than six hours on the way in —
+because `finally` cannot run if the daemon is killed or the machine sleeps, which is exactly the
+case that leaves compute running. Worst case is now ~$0.64 rather than unbounded.
+
+Note the Launch-plan floor: `suspend_timeout_seconds` below 300 is rejected with
+`412 suspend interval is too short for your plan`.
 
 **3. `runBehavioral` does not receive `missionEnv`.** `nadineTarget.runBehavioral` derives
 PYTHONPATH from its own `cwd`, so it reads the right tree, and DB overrides reach it through the
