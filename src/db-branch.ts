@@ -47,6 +47,64 @@ export type DbBranchOutcome =
 
 const NEON_API = "https://console.neon.tech/api/v2";
 
+// Cost controls. Measured rates on the nadeen project (Launch plan, 2026-07-27):
+// storage $0.35/GB-month, compute $0.106/CU-hour.
+//
+// Storage is a non-issue: a branch is copy-on-write, so it starts at 0 bytes against a 15GB
+// parent and only the post-branch delta is billed — a 2GB migration delta held for an hour is
+// about $0.001. Compute is the whole cost, and an orphan is the whole risk:
+//
+//   torn down after 30 min at 0.25 CU   ~$0.013   (noise)
+//   orphan, autosuspend working          ~$0.70/month  (storage delta only)
+//   orphan, 0.25 CU never suspending    ~$19/month
+//   orphan, 2 CU never suspending      ~$155/month     <- the one to prevent
+//
+// So: pin the ceiling low, make the idle timeout explicit rather than inherited, and sweep
+// orphans on the way in because teardown cannot be relied on to run.
+const MISSION_MIN_CU = 0.25;
+const MISSION_MAX_CU = 1;
+// 300s is the floor on the Launch plan — anything shorter is rejected with
+// `412 suspend interval is too short for your plan`. Costs ~$0.002 of trailing idle compute
+// per mission at the pinned min CU, which is not worth optimising further.
+const MISSION_SUSPEND_SECONDS = 300;
+/** Mission branches older than this are assumed orphaned by a crashed run and removed. */
+const ORPHAN_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Delete `missions/*` branches left behind by earlier runs.
+ *
+ * Skips the current mission's own branch name, and anything younger than ORPHAN_MAX_AGE_MS so a
+ * genuinely concurrent mission is never cut out from under itself. Non-throwing: a failed sweep
+ * must not stop the mission that is trying to start.
+ */
+async function sweepOrphanBranches(apiKey: string, projectId: string, missionId: string): Promise<string[]> {
+	const keep = `missions/${missionId}`;
+	const removed: string[] = [];
+	try {
+		const res = await fetch(`${NEON_API}/projects/${projectId}/branches`, {
+			headers: { Authorization: `Bearer ${apiKey}` },
+		});
+		if (!res.ok) return removed;
+		const { branches = [] } = (await res.json()) as {
+			branches?: Array<{ id?: string; name?: string; created_at?: string; default?: boolean }>;
+		};
+		for (const b of branches) {
+			if (!b.id || !b.name || b.default) continue;
+			if (!b.name.startsWith("missions/") || b.name === keep) continue;
+			const age = b.created_at ? Date.now() - Date.parse(b.created_at) : 0;
+			if (age < ORPHAN_MAX_AGE_MS) continue;
+			const del = await fetch(`${NEON_API}/projects/${projectId}/branches/${b.id}`, {
+				method: "DELETE",
+				headers: { Authorization: `Bearer ${apiKey}` },
+			});
+			if (del.ok) removed.push(b.name);
+		}
+	} catch {
+		/* a sweep that fails must never block the mission */
+	}
+	return removed;
+}
+
 /**
  * Provision a Neon branch for a mission that plans schema work.
  *
@@ -74,12 +132,32 @@ export async function provisionDbBranch(options: {
 		};
 	}
 
+	// Sweep first. `finally` cannot run if the daemon is killed, the machine sleeps, or the
+	// process dies outside the try — and an orphaned branch whose compute never suspends is
+	// the only genuinely expensive failure mode here (see the cost note at the top of this file).
+	const swept = await sweepOrphanBranches(apiKey, projectId, missionId);
+	if (swept.length) console.log(`[db-branch] swept ${swept.length} orphaned mission branch(es): ${swept.join(", ")}`);
+
 	const branchName = `missions/${missionId}`;
 	try {
 		const res = await fetch(`${NEON_API}/projects/${projectId}/branches`, {
 			method: "POST",
 			headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-			body: JSON.stringify({ branch: { name: branchName }, endpoints: [{ type: "read_write" }] }),
+			body: JSON.stringify({
+				branch: { name: branchName },
+				endpoints: [
+					{
+						type: "read_write",
+						// Both of these are cost controls, and both must be explicit. Left unset, the
+						// endpoint inherits the project defaults — measured as 0.25-2 CU with an implicit
+						// suspend timeout, i.e. up to 8x the compute ceiling a migration needs and no
+						// stated idle behaviour.
+						autoscaling_limit_min_cu: MISSION_MIN_CU,
+						autoscaling_limit_max_cu: MISSION_MAX_CU,
+						suspend_timeout_seconds: MISSION_SUSPEND_SECONDS,
+					},
+				],
+			}),
 		});
 		if (!res.ok) {
 			return {
