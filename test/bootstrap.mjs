@@ -1,21 +1,24 @@
 /**
- * Tests for how a worktree gets its dependencies.
+ * Tests for what a worktree is given before any work starts.
  *
- * The distinction under test is the one that caused nadine to hold 4.5GB: a
- * SYMLINKED dependency dir is shared with the main checkout, so a worker's
- * install either writes through into it or replaces the link with a real
- * multi-gigabyte tree. A CLONED one is private, writable, and costs the delta.
+ * This file used to test dependency inheritance — symlinked venvs and cloned node_modules.
+ * That mechanism is gone: dependencies are installed by the setup stage (setup.ts) rather than
+ * copied from the main checkout, because inheriting an install meant a mission that changed a
+ * lockfile could never test its own change.
  *
- * The must-never case is the last test: writing inside a cloned dir must not be
- * visible in the main checkout.
+ * What bootstrap still owns is the one thing no install can recreate: secrets. So these cover
+ * env-file discovery and copying, plus the properties that must hold around them — discovery
+ * must not pick up templates or credential backups, a copy must be independent of the main
+ * checkout, and nothing placed here may reach a commit.
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const { bootstrapWorktree } = await import("../dist/bootstrap.js");
+const { discoverEnvFiles } = await import("../dist/target/generic.js");
 
 let failures = 0;
 async function check(name, fn) {
@@ -32,103 +35,108 @@ function assert(cond, msg) {
 }
 
 const roots = [];
-/** A main checkout with an env file, a fake venv, and a fake node_modules. */
+
+/**
+ * A git repo standing in for a main checkout: a root env file, a nested one, a template, a
+ * credentials backup, and a .gitignore covering the real ones. Discovery asks git what is
+ * ignored, so this has to be a real repo rather than a bare directory.
+ */
 function scaffold() {
 	const root = mkdtempSync(join(tmpdir(), "missions-boot-"));
 	roots.push(root);
 	const main = join(root, "main");
 	const work = join(root, "work");
-	mkdirSync(join(main, "node_modules", "left-pad"), { recursive: true });
-	mkdirSync(join(main, ".venv", "bin"), { recursive: true });
+	mkdirSync(join(main, "webapp"), { recursive: true });
 	mkdirSync(work, { recursive: true });
+
+	writeFileSync(join(main, ".gitignore"), ".env\n.env.*\nwebapp/.env.local\n");
 	writeFileSync(join(main, ".env"), "SECRET=from-main\n");
-	writeFileSync(join(main, "node_modules", "left-pad", "index.js"), "module.exports = 1\n");
-	writeFileSync(join(main, ".venv", "bin", "python"), "#!/bin/sh\n");
+	writeFileSync(join(main, "webapp", ".env.local"), "VITE_KEY=abc\n");
+	writeFileSync(join(main, ".env.example"), "SECRET=replace-me\n");
+	writeFileSync(join(main, ".env.backup"), "SECRET=old-live-key\n");
+	writeFileSync(join(main, "README.md"), "# fixture\n");
+
+	execFileSync("git", ["init", "-q"], { cwd: main });
+	execFileSync("git", ["add", "-A"], { cwd: main });
+	execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"], { cwd: main });
 	return { main, work };
 }
 
-const spec = (over = {}) => ({ envFiles: [".env"], linkDirs: [".venv"], cloneDirs: ["node_modules"], sourceRoots: [], ...over });
-
-await check("env files are copied, never linked", async () => {
-	const { main, work } = scaffold();
-	const r = await bootstrapWorktree({ targetCwd: main, workCwd: work, spec: spec() });
-	assert(r.envFiles.includes(".env"), "env not reported");
-	assert(!lstatSync(join(work, ".env")).isSymbolicLink(), "env was symlinked — a shared file beats mission overrides");
-	assert(readFileSync(join(work, ".env"), "utf-8").includes("from-main"), "env content missing");
+await check("discovery finds gitignored env files, root and nested", async () => {
+	const { main } = scaffold();
+	const found = discoverEnvFiles(main);
+	assert(found.includes(".env"), `.env missing: ${JSON.stringify(found)}`);
+	assert(found.includes("webapp/.env.local"), `nested env missing: ${JSON.stringify(found)}`);
 });
 
-await check("linkDirs are symlinked", async () => {
-	const { main, work } = scaffold();
-	const r = await bootstrapWorktree({ targetCwd: main, workCwd: work, spec: spec() });
-	assert(r.linkedDirs.includes(".venv"), `.venv not linked: ${JSON.stringify(r.linkedDirs)}`);
-	assert(lstatSync(join(work, ".venv")).isSymbolicLink(), ".venv is not a symlink");
+await check("discovery skips templates — tracked, and nothing secret in them", async () => {
+	const { main } = scaffold();
+	assert(!discoverEnvFiles(main).includes(".env.example"), "would have copied a template");
 });
 
-await check("cloneDirs become REAL directories, not symlinks", async () => {
-	const { main, work } = scaffold();
-	const r = await bootstrapWorktree({ targetCwd: main, workCwd: work, spec: spec() });
-	assert(r.clonedDirs.includes("node_modules"), `node_modules not cloned: ${JSON.stringify(r)}`);
-	assert(!lstatSync(join(work, "node_modules")).isSymbolicLink(), "node_modules is still a symlink — an install would hit the main checkout");
-	assert(existsSync(join(work, "node_modules", "left-pad", "index.js")), "clone did not carry contents");
+await check("discovery skips credential BACKUPS", async () => {
+	// Regression: the declared list this replaced copied backend/.env.naomi-e2e.backup into every
+	// worktree — live credentials nobody asked for, sitting where a worker could read them.
+	const { main } = scaffold();
+	assert(!discoverEnvFiles(main).includes(".env.backup"), "would have copied a credentials backup");
 });
 
-await check("a cloned dir is PRIVATE — installing into it cannot reach the main checkout", async () => {
-	// The whole point. If this fails, a mission can corrupt the tree you work in.
+await check("env files are COPIED into the worktree", async () => {
 	const { main, work } = scaffold();
-	await bootstrapWorktree({ targetCwd: main, workCwd: work, spec: spec() });
-	writeFileSync(join(work, "node_modules", "left-pad", "index.js"), "module.exports = 999\n");
-	mkdirSync(join(work, "node_modules", "brand-new-pkg"), { recursive: true });
-	assert(readFileSync(join(main, "node_modules", "left-pad", "index.js"), "utf-8").includes("= 1"), "a write in the worktree changed the MAIN checkout");
-	assert(!existsSync(join(main, "node_modules", "brand-new-pkg")), "an install in the worktree appeared in the MAIN checkout");
+	const r = bootstrapWorktree({ targetCwd: main, workCwd: work });
+	assert(r.envFiles.includes(".env"), `.env not copied: ${JSON.stringify(r.envFiles)}`);
+	assert(existsSync(join(work, ".env")), ".env absent from the worktree");
+	assert(readFileSync(join(work, ".env"), "utf-8").includes("from-main"), "copied the wrong contents");
 });
 
-await check("everything the harness placed is excluded from commits", async () => {
+await check("nested env files land at the right path", async () => {
 	const { main, work } = scaffold();
-	const r = await bootstrapWorktree({ targetCwd: main, workCwd: work, spec: spec() });
-	for (const p of [".env", ".venv", "node_modules"]) {
-		assert(r.gitExcludes.includes(p), `${p} missing from gitExcludes — git add -A would stage it`);
+	bootstrapWorktree({ targetCwd: main, workCwd: work });
+	assert(existsSync(join(work, "webapp", ".env.local")), "nested env not placed — Vite/Next read only their own dir");
+});
+
+await check("a copy is independent of the main checkout", async () => {
+	// Copied, never symlinked: Config loads .env with override=True, so a shared file would beat
+	// any value the harness injects — a mission's database override must be the value on disk.
+	const { main, work } = scaffold();
+	bootstrapWorktree({ targetCwd: main, workCwd: work });
+	writeFileSync(join(work, ".env"), "SECRET=mission-override\n");
+	assert(readFileSync(join(main, ".env"), "utf-8").includes("from-main"), "writing the worktree's env changed the main checkout");
+});
+
+await check("everything bootstrap placed is excluded from commits", async () => {
+	const { main, work } = scaffold();
+	const r = bootstrapWorktree({ targetCwd: main, workCwd: work });
+	for (const f of r.envFiles) {
+		assert(r.gitExcludes.includes(f), `${f} missing from gitExcludes — git add -A could stage it`);
 	}
 });
 
-await check("a worker's own real directory is never replaced", async () => {
-	const { main, work } = scaffold();
-	mkdirSync(join(work, "node_modules"), { recursive: true });
-	writeFileSync(join(work, "node_modules", "worker-made-this.txt"), "keep me\n");
-	await bootstrapWorktree({ targetCwd: main, workCwd: work, spec: spec() });
-	assert(existsSync(join(work, "node_modules", "worker-made-this.txt")), "clobbered a directory the worker created");
+await check("a repo with no env files is not an error", async () => {
+	const root = mkdtempSync(join(tmpdir(), "missions-boot-bare-"));
+	roots.push(root);
+	const main = join(root, "main");
+	const work = join(root, "work");
+	mkdirSync(main, { recursive: true });
+	mkdirSync(work, { recursive: true });
+	writeFileSync(join(main, "README.md"), "# no secrets here\n");
+	execFileSync("git", ["init", "-q"], { cwd: main });
+	execFileSync("git", ["add", "-A"], { cwd: main });
+	execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"], { cwd: main });
+
+	const r = bootstrapWorktree({ targetCwd: main, workCwd: work });
+	assert(r.envFiles.length === 0, `invented env files: ${JSON.stringify(r.envFiles)}`);
+	assert(r.notes.some((n) => n.includes("no gitignored env files")), "said nothing about having found none");
 });
 
-await check("our own stale symlink IS replaced", async () => {
+await check("dependencies are NOT inherited — that is the setup stage's job", async () => {
 	const { main, work } = scaffold();
-	symlinkSync(join(main, "node_modules"), join(work, "node_modules"), "dir");
-	const r = await bootstrapWorktree({ targetCwd: main, workCwd: work, spec: spec() });
-	assert(r.clonedDirs.includes("node_modules"), "left a stale symlink in place of a clone");
-	assert(!lstatSync(join(work, "node_modules")).isSymbolicLink(), "still a symlink");
+	mkdirSync(join(main, "node_modules", "left-pad"), { recursive: true });
+	writeFileSync(join(main, "node_modules", "left-pad", "index.js"), "module.exports = 1\n");
+	bootstrapWorktree({ targetCwd: main, workCwd: work });
+	assert(!existsSync(join(work, "node_modules")), "bootstrap copied or linked node_modules — setup installs those now");
 });
 
-await check("a missing source dir is skipped, not fatal", async () => {
-	const { main, work } = scaffold();
-	const r = await bootstrapWorktree({ targetCwd: main, workCwd: work, spec: spec({ cloneDirs: ["node_modules", "does/not/exist"], linkDirs: [".venv", "nope"] }) });
-	assert(r.clonedDirs.includes("node_modules"), "real dir not cloned");
-	assert(!r.clonedDirs.includes("does/not/exist"), "reported a clone that cannot exist");
-	assert(!existsSync(join(work, "does")), "created a directory for a missing source");
-});
-
-await check("clones are copy-on-write where the filesystem supports it", async () => {
-	// Not a correctness requirement — a real copy still works — so this reports
-	// rather than fails on a filesystem without clone support.
-	const { main, work } = scaffold();
-	await bootstrapWorktree({ targetCwd: main, workCwd: work, spec: spec() });
-	let cow = false;
-	try {
-		execFileSync("cp", ["-Rc", join(main, "node_modules"), join(work, "cow-probe")], { stdio: "ignore" });
-		cow = true;
-	} catch {
-		/* filesystem cannot clone */
-	}
-	console.log(`     (copy-on-write ${cow ? "available" : "NOT available"} on ${process.platform})`);
-});
-
-for (const r of roots) rmSync(r, { recursive: true, force: true });
+for (const r of roots) rmSync(r, { recursive: true, force: true, maxRetries: 3 });
 console.log(failures ? `\n${failures} failed` : "\nall passed");
 process.exit(failures ? 1 : 0);
