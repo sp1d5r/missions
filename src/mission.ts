@@ -16,7 +16,7 @@ import { loadAgentSpecs } from "./subagent.js";
 import { annotateVerdict } from "./validators/checks.js";
 import { runValidators } from "./validators/index.js";
 import { runWorker } from "./worker.js";
-import { serveWorkers } from "./workers.js";
+import { awaitOperatorSteer, listWorkers, resumeWorker, serveWorkers } from "./workers.js";
 
 export type MissionEvent =
 	| { type: "status"; status: MissionState["status"] }
@@ -221,6 +221,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 			emit(`── milestone ${m}/${maxMilestones}: ${queue.length} feature(s)`);
 			store.appendEvent("milestone_verdict", `milestone ${m} started`, `${queue.length} feature(s) queued`);
 			const handoffs: Handoff[] = [];
+			const liveThisMilestone: { workerId: string; release: () => void }[] = [];
 
 			for (const feature of queue) {
 				const remaining = config.budgetUsd - store.state.costUsd;
@@ -264,6 +265,9 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 
 				handoffs.push(result.handoff);
 				store.state.handoffs.push(result.handoff);
+				// Held, not released: the worker stays socket-addressable through validation and
+				// triage so a stalled milestone can be steered by the agent that has the context.
+				liveThisMilestone.push(result);
 				store.save();
 
 				// Surface the parts of the handoff a human would want to hear immediately.
@@ -429,6 +433,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 				store.save();
 				emit(`milestone ${m}: STALLED — ${blockers.map((b) => b.invariant).join(", ")} — needs you`);
 				store.appendEvent("milestone_verdict", `milestone ${m}: STALLED`, blockers.map((b) => b.invariant).join(", "));
+				await offerRescue(liveThisMilestone, workCwd, gitExcludes, store, emit, config.rescueWaitMs);
 				break;
 			}
 
@@ -454,6 +459,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 				store.save();
 				emit(`milestone ${m}: STALLED — no corrections offered, needs you`);
 				store.appendEvent("milestone_verdict", `milestone ${m}: STALLED`, "no corrections offered");
+				await offerRescue(liveThisMilestone, workCwd, gitExcludes, store, emit, config.rescueWaitMs);
 				break;
 			}
 
@@ -563,4 +569,65 @@ function reopenIssuesFor(handoffs: Handoff[], droppedIds: string[]): number {
 		}
 	}
 	return count;
+}
+
+/**
+ * Hold a STALLED milestone open so its worker can be steered, instead of exiting on it.
+ *
+ * The failure this closes: a worker used to be unregistered the instant its own turn ended, which
+ * is before validation runs and long before the orchestrator decides the milestone stalled. So a
+ * worker was reachable for its entire life EXCEPT the one moment an operator wanted it — the
+ * "needs you" moment — and all that survived was a paragraph of handoff text. Meanwhile the agent
+ * itself still held the files it had read and the reasoning behind its choices, which is the
+ * expensive part and the part a fresh worker has to buy again.
+ *
+ * So on a stall, if anyone is listening, the mission says how to reach the worker and waits. A
+ * steer resumes that same agent with its context, and whatever it changes is committed onto the
+ * mission's branch.
+ *
+ * Deliberately does NOT re-run the validators afterwards — the milestone verdict stays STALLED and
+ * the operator re-checks. Auto-revalidating a rescue means restructuring the milestone loop, and a
+ * committed fix plus an honest STALLED is worth more than a green verdict this cannot yet earn.
+ */
+async function offerRescue(
+	live: { workerId: string; release: () => void }[],
+	workCwd: string,
+	gitExcludes: string[],
+	store: StateStore,
+	emit: (message: string) => void,
+	waitMs = 0,
+): Promise<void> {
+	if (waitMs <= 0 || !live.length || !listWorkers().length) {
+		for (const w of live) w.release();
+		return;
+	}
+
+	const mins = Math.round(waitMs / 60_000);
+	emit(`  ⏸ holding ${live.length} worker(s) open for ${mins}m — steer one and it will fix this with its context intact:`);
+	for (const w of live) emit(`      missions steer ${w.workerId} "<what to change>"`);
+
+	const steered = await awaitOperatorSteer(waitMs);
+	if (!steered) {
+		emit("  ⏹ nobody steered — releasing the workers and ending the mission");
+		for (const w of live) w.release();
+		return;
+	}
+
+	emit(`  ▶ ${steered} resumed by operator`);
+	// The steer text is already in the worker's queue; resume acts on it. Pull the latest so the
+	// resume prompt restates it — a worker that has gone idle will not otherwise read it.
+	const info = listWorkers().find((w) => w.id === steered);
+	const instruction = info?.steers.slice(-1)[0] ?? "Fix the reason this milestone stalled.";
+	const reply = await resumeWorker(steered, instruction);
+	if (reply) emit(`  ${steered}: ${reply.slice(0, 300)}`);
+
+	const sha = commitAll(workCwd, `fix(${steered}): operator rescue\n\nvia pi-missions ${store.state.id}`, gitExcludes);
+	if (sha) {
+		store.state.commits.push({ featureId: steered, sha, message: "operator rescue" });
+		store.save();
+		emit(`  committed ${sha.slice(0, 8)} (operator rescue) — re-run your check to confirm`);
+	} else {
+		emit("  rescue produced no file changes — nothing committed");
+	}
+	for (const w of live) w.release();
 }

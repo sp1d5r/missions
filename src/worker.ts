@@ -59,6 +59,14 @@ export interface WorkerResult {
 	aborted: boolean;
 	errorMessage?: string;
 	turns: number;
+	/** Socket-addressable id, for `missions ask/steer` while the milestone is still open. */
+	workerId: string;
+	/**
+	 * Drop this worker from the live registry. The caller owns the lifetime: a worker stays
+	 * reachable through validation and triage so a STALLED milestone can be steered by the agent
+	 * that did the work, rather than losing its context at the moment help is needed.
+	 */
+	release: () => void;
 }
 
 export interface RunWorkerOptions {
@@ -221,7 +229,12 @@ Make the change now, then emit your handoff block.`;
 		errorMessage = err instanceof Error ? err.message : String(err);
 	}
 	await agent.waitForIdle();
-	unregister();
+	// NOT unregistered here. This used to drop the worker the instant its turn ended — before
+	// validation ran, before the orchestrator triaged, and so before the mission could possibly
+	// know it needed help. The result was that a worker was addressable for its whole life
+	// EXCEPT the one moment an operator would want to reach it: "milestone STALLED — needs you",
+	// where by then the only thing left was its handoff text. The caller decides when it dies,
+	// so a stalled milestone can still be steered by the agent that has the context.
 
 	// Any command still in flight when we aborted: record it with an unknown exit code
 	// rather than dropping it. A killed command is exactly the kind of thing the next
@@ -255,6 +268,8 @@ Make the change now, then emit your handoff block.`;
 		aborted,
 		errorMessage,
 		turns: agent.state.messages.filter((m) => m.role === "assistant").length,
+		workerId,
+		release: unregister,
 	};
 }
 

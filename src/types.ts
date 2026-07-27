@@ -264,6 +264,15 @@ export interface MissionConfig {
 	maxMilestones?: number;
 	/** Optional repo check command run by the scrutiny validator (e.g. "npm test"). */
 	checkCommand?: string;
+	/**
+	 * How long a STALLED milestone stays open for an operator to steer its worker, in ms.
+	 *
+	 * A stall is the moment the mission most needs a human, and its workers still hold everything
+	 * expensive — the files they read, why they chose what they chose. Exiting immediately throws
+	 * that away. 0 disables the wait (right for cron and CI, where nobody is watching).
+	 * Default 0, so unattended runs behave exactly as before.
+	 */
+	rescueWaitMs?: number;
 	/** Which target adapter to use for behavioral validation. */
 	target: "generic" | "nadine";
 	/** Run in an isolated git worktree (enables true parallel missions). Default true. */

@@ -125,6 +125,72 @@ export function askWorker(id: string, question: string, timeoutMs = 120_000): Pr
 	});
 }
 
+/**
+ * Put an idle worker back to work, keeping its context.
+ *
+ * `steer` is for a worker mid-run — it lands at the next turn boundary. A worker whose milestone
+ * has stalled is already idle, so a steer would sit in its queue unread; it needs a new prompt on
+ * the same agent, which continues the existing conversation rather than starting a fresh one. That
+ * distinction is the whole value: the agent still holds the files it read and the reasoning it did.
+ *
+ * Returns its reply text, or null if there is no such worker.
+ */
+export async function resumeWorker(id: string, instruction: string): Promise<string | null> {
+	const w = workers.get(id);
+	if (!w) return null;
+	w.info.lastActivity = "resumed by operator";
+	try {
+		await w.agent.prompt(
+			`OPERATOR — your milestone did not pass and you are being resumed to fix it. You keep everything from before; do not start over.\n\n${instruction}\n\nMake the change, then state in one or two lines what you changed and how it can be verified.`,
+		);
+	} catch {
+		// A resume that errors is reported as "no reply" rather than taking the mission down.
+	}
+	await w.agent.waitForIdle();
+	return w.recent.slice(-1)[0] ?? "";
+}
+
+/**
+ * Hold a stalled milestone open, waiting for an operator to steer one of its workers.
+ *
+ * A mission that says "STALLED — needs you" and then exits is telling you it needs you at the
+ * exact moment it has stopped being able to hear you. Its workers still hold everything expensive
+ * — the files they read, the reasoning they did, why they chose what they chose — and throwing
+ * that away means the next attempt rediscovers it from a handoff paragraph.
+ *
+ * So the process stays up, serving its socket, until one of three things happens:
+ *   - an operator steers a worker      → resolves with that worker's id, and the milestone retries
+ *   - the wait times out               → resolves null, and the mission ends as it does today
+ *   - nothing is alive to steer        → resolves null immediately
+ *
+ * The timeout matters: missions run unattended, and a stall that blocks forever would hold a
+ * worktree and an API budget hostage waiting for someone who is asleep.
+ */
+export function awaitOperatorSteer(timeoutMs: number, onWaiting?: (secondsLeft: number) => void): Promise<string | null> {
+	if (!workers.size) return Promise.resolve(null);
+	const before = new Map([...workers].map(([id, w]) => [id, w.info.steers.length]));
+
+	return new Promise((resolve) => {
+		let done = false;
+		const finish = (v: string | null) => {
+			if (done) return;
+			done = true;
+			clearInterval(poll);
+			clearTimeout(timer);
+			resolve(v);
+		};
+		const timer = setTimeout(() => finish(null), timeoutMs);
+		onWaiting?.(Math.round(timeoutMs / 1000));
+		// Polled rather than event-driven: a steer can arrive through the socket handler, the CLI,
+		// or the overseer, and all three land in the same place — one more entry in info.steers.
+		const poll = setInterval(() => {
+			for (const [id, w] of workers) {
+				if (w.info.steers.length > (before.get(id) ?? 0)) return finish(id);
+			}
+		}, 500);
+	});
+}
+
 // ── Serving them to other processes ───────────────────────────────────────────────────────────
 
 interface Req {
