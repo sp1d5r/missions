@@ -1,4 +1,6 @@
-import { createCodingTools } from "@earendil-works/pi-coding-agent";
+import { createCodingTools, loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { type AgentSpec, createDelegateTool } from "./subagent.js";
 import { Agent, getEnvApiKey, getModel, streamFn, type AgentEvent, type AgentMessage, type AssistantMessage } from "./pi.js";
 import { parseJson } from "./llm.js";
@@ -167,13 +169,14 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult
 		: "";
 
 	const doctrineText = envDoctrine ? `\nENVIRONMENT — read this before running anything:\n${envDoctrine}\n` : "";
+	const contextText = repoContext(cwd);
 
 	const task = `Implement this feature.
 
 YOUR WORKING DIRECTORY: ${cwd}
 Everything you read, edit and run lives under that path. It is a git worktree of the target repo,
 yours alone for this mission.
-${doctrineText}
+${doctrineText}${contextText}
 FEATURE: ${feature.title}
 ${feature.description}
 ${addressesText}${procedureText}
@@ -221,6 +224,46 @@ Make the change now, then emit your handoff block.`;
 		errorMessage,
 		turns: agent.state.messages.filter((m) => m.role === "assistant").length,
 	};
+}
+
+/**
+ * The target repo's own instructions to agents, handed to the worker verbatim.
+ *
+ * Without this a worker opens on a large unfamiliar monorepo knowing only its one feature —
+ * no conventions, no runtime doctrine, no idea which of two products it is in or which package
+ * manager to use. It then guesses, and guesses cost a milestone. A repo that has written its
+ * rules down should not have to rely on the model inferring them.
+ *
+ * Uses pi's own discovery so the file that governs a worker is the same file that governs an
+ * interactive pi session in that directory: AGENTS.md / CLAUDE.md from the agent dir and every
+ * ancestor of cwd. Note it does NOT walk downward — a per-directory AGENTS.md deeper in the tree
+ * is invisible from the repo root, so root-level content is what actually reaches the worker.
+ */
+function repoContext(cwd: string): string {
+	const agentDir = join(homedir(), ".pi");
+	let files: Array<{ path: string; content: string }> = [];
+	try {
+		// Ancestor-walking is a problem here specifically because mission worktrees live INSIDE the
+		// target repo, at <repo>/.missions/worktrees/<id>. The walk therefore also finds the PARENT
+		// checkout's AGENTS.md — a different tree, at a different commit, possibly with uncommitted
+		// edits. Handing a worker both copies means handing it two versions of the rules and letting
+		// it pick. Keep only this tree's own files, plus the user's global ones.
+		files = loadProjectContextFiles({ cwd, agentDir }).filter(
+			(f) => f.path.startsWith(cwd) || f.path.startsWith(agentDir),
+		);
+	} catch {
+		// Missing or unreadable context is not a reason to fail the mission — the worker just
+		// starts less informed, which is the status quo this function exists to improve on.
+		return "";
+	}
+	if (!files.length) return "";
+	const blocks = files.map((f) => `<<< ${f.path} >>>\n${f.content.trim()}`).join("\n\n");
+	return `
+REPOSITORY INSTRUCTIONS — the target repo's own rules for agents. These are binding, and they
+override your general habits where the two disagree.
+
+${blocks}
+`;
 }
 
 /** Shape of the raw JSON we ask the worker for — every field optional, nothing trusted. */
