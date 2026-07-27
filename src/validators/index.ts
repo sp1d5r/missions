@@ -63,8 +63,9 @@ export async function runValidators(options: RunValidatorsOptions): Promise<Scor
 		} else if (a.method.type === "behavioral") {
 			onProgress?.(`assert ${a.id}: behavioral ${a.method.scenario}`);
 			// Behavioral scenarios are mission-specific, not repo-specific: state the command in
-			// the RFC and let it be a bash-command assertion. Recorded as skipped, never as passed.
-			mark(a, true, `SKIPPED — behavioral assertions are not run; express "${a.method.scenario}" as a bash-command assertion instead`);
+			// the RFC and let it be a bash-command assertion. Recorded as NOT passed (skipped),
+			// so it does not increment assertionsPassed or strengthBreakdown.behavioural.passed.
+			mark(a, false, `SKIPPED — behavioral assertions are not run; express "${a.method.scenario}" as a bash-command assertion instead`);
 			// Non-bash assertions keep their declared strength; behavioral method defaults to 'behavioural'.
 			if (a.strength === undefined) a.strength = "behavioural";
 		} else {

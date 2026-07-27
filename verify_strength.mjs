@@ -182,6 +182,37 @@ check("(e2) applyStrengthClassification with missing strength → no crash, no s
   return !threw && result.strengthCorrected === undefined;
 });
 
+console.log("\n── Skipped-behavioural regression ──\n");
+
+// A plan with one 'behavioral'-method (skipped) assertion and only existence/review passing
+// assertions must still produce the existence-only annotated CLEAN, not a plain CLEAN.
+// This is the regression for the bug where mark(a, true, 'SKIPPED') incremented
+// strengthBreakdown.behavioural.passed and suppressed the existence-only annotation.
+check("(f1) skipped behavioural (passed=0) + existence/review passes → annotated CLEAN", () => {
+  // Simulate: one behavioural assertion that was skipped (passed=0), two existence that passed.
+  const scoreCard = {
+    strengthBreakdown: {
+      behavioural: { passed: 0, total: 1 },  // skipped = not passed
+      existence:   { passed: 2, total: 2 },
+      review:      { passed: 1, total: 1 },
+    },
+  };
+  const v = annotateVerdict("CLEAN", scoreCard);
+  return v.includes("existence-only") && v.includes("no assertion executed the feature");
+});
+
+check("(f2) skipped behavioural must NOT produce plain CLEAN (no suppression of annotation)", () => {
+  const scoreCard = {
+    strengthBreakdown: {
+      behavioural: { passed: 0, total: 1 },  // skipped = not passed
+      existence:   { passed: 1, total: 1 },
+    },
+  };
+  const v = annotateVerdict("CLEAN", scoreCard);
+  // plain CLEAN would mean the annotation was wrongly suppressed
+  return v !== "CLEAN";
+});
+
 console.log("\n── Summary ──\n");
 const total = passed + failed;
 const allPass = failed === 0;

@@ -21,16 +21,23 @@ Principles:
   before finishing). The worker reports whether it followed them. Use them where a feature has a sharp edge.
 - Keep it tight. 1-3 features for a first pass unless the goal clearly needs more.
 
-Every assertion MUST carry a "strength" field — this is required for the verdict to be honest:
-- "behavioural": the command actually EXECUTES the feature (calls the code, runs the binary, exercises real logic).
+Every assertion MUST carry a "strength" field — this is required for the verdict to be honest.
+The three allowed values and their exact semantics:
+- "behavioural": the command actually EXECUTES the feature (calls the code, runs the binary, exercises real
+  logic). Only a passing behavioural assertion suppresses the existence-only warning in the final verdict.
   Example: node dist/cli.js view "$RUN_ID" --json | jq -e '.timeline | length > 0'
-- "existence": the command only inspects the filesystem without executing the feature.
+- "existence": the command only inspects the filesystem without executing the feature (file present, symbol
+  exported, pattern grep'd). Does NOT suppress the existence-only warning on its own.
   Example: test -f src/mission-view.ts && grep -q 'export' src/mission-view.ts
-- "review": a human or LLM reads the diff and judges it (always use this for code-review method assertions).
+- "review": a human or LLM reads the diff and judges it. Always use this for code-review method assertions.
+  Does NOT suppress the existence-only warning on its own.
 
 Aim for at least one "behavioural" assertion per feature where a testable surface exists. An existence-only run
 prints a warning in the final verdict. The harness auto-corrects declared "behavioural" to "existence" if the
 command is purely filesystem-inspection (test, ls, stat, find, grep, cat, head, wc, etc.) — so declare honestly.
+Note: "behavioral" method assertions (end-to-end scenarios) are SKIPPED by the harness and counted as NOT
+passed — they never satisfy the behavioural strength requirement. Use bash-command with strength "behavioural"
+for executable checks.
 
 Output ONLY a JSON object, no prose, in exactly this shape:
 {
