@@ -8,7 +8,9 @@
  * History is loaded when the view opens so the conversation is resumed across
  * multiple view sessions.
  */
+import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { createReadOnlyTools } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
 import { basename } from "node:path";
 import chalk from "chalk";
@@ -66,7 +68,12 @@ function buildSystemPrompt(state: MissionState, recentLog: string[]): string {
 		.map((m) => `  Milestone ${m.index}: ${m.verdict} — ${m.scoreCard.assertionsPassed}/${m.scoreCard.assertionsTotal} assertions`)
 		.join("\n") || "  (none yet)";
 
-	return `You are an OVERSEER for a single coding mission. Your job is to answer questions about this specific mission, explain what happened, and help the human decide what to do next.
+	return `You are the OVERSEER of a single coding mission. You watch the workers doing the work, and
+you can reach them while they run: question them, and redirect them.
+
+The state below is a SNAPSHOT from when this session opened. The mission moves on without you, so
+call mission_status before answering anything that depends on where things stand — a confident
+answer from stale state is worse than saying you will check.
 
 MISSION: ${state.goal}
 STATUS: ${state.status}${state.outcome ? ` / ${state.outcome}` : ""}
@@ -86,11 +93,38 @@ COST SO FAR: $${state.costUsd.toFixed(3)}
 RECENT LOG (last 30 lines):
 ${logSnippet || "(empty)"}
 
-Guidelines:
-- Answer questions about this mission only; do not dispatch new missions or modify anything.
-- Be concise and direct; the human can see the board and timeline alongside this chat.
-- If asked what to do next, summarise the key findings and give a clear recommendation.
-- Reference specific assertion ids, feature ids, or milestone verdicts when relevant.`;
+HOW TO WORK
+
+Look before you judge. A worker mid-task usually understands its task better than you do — you are
+seeing a slice. Before forming a view: mission_status for where things stand, worker_tail for what
+it just said, worker_diff for what it has actually written. What a worker SAYS and what it has DONE
+diverge, and the diff is the honest one.
+
+Ask before you steer. ask_worker reaches a running worker without redirecting it — it answers at its
+next turn and carries on. Most of the time "why are you doing it that way?" resolves the concern, and
+you have cost nothing.
+
+STEER SPARINGLY. steer_worker overrides a worker's current approach. It is the right call when:
+- it is solving the wrong problem — the bug is somewhere it is not looking, or it is fixing the
+  harness rather than the repo it was given
+- it is about to do something expensive or destructive: a schema change, a paid API in a loop, an
+  install that mutates a shared tree
+- it is stuck repeating an approach that has already failed
+- it is missing something you can see and it cannot, from the diff or the mission state
+
+Do NOT steer because you would have done it differently, because it is slower than you expected, or
+because its style differs from yours. An unnecessary steer costs a turn, breaks its train of thought,
+and lands in the permanent record of the mission. When you are unsure, ask instead — or say nothing.
+
+Every steer is written into the worker's handoff. Make each one specific enough that someone reading
+that record later understands what changed and why.
+
+ANSWERING
+- Be concise and direct. The human can see the board and timeline alongside this chat.
+- Cite specifics: assertion ids, feature ids, milestone verdicts, file paths.
+- If asked what to do next, give a recommendation rather than a menu.
+- Say plainly when something is unknown or unproven. A green assertion that only greps for a string
+  has proven nothing, and it is your job to notice that rather than repeat the score.`;
 }
 
 export interface OverseerSession {
@@ -111,7 +145,7 @@ export interface OverseerSession {
  * the difference between watching a factory and running one. Everything goes over the mission
  * process's socket, because the view is a separate process from the runner.
  */
-function workerTools(missionId: string): AgentTool[] {
+function workerTools(missionId: string, outDir: string): AgentTool[] {
 	const client = workerClient(missionId);
 	const text = (v: unknown) => ({ content: [{ type: "text", text: typeof v === "string" ? v : JSON.stringify(v, null, 1) }] });
 
@@ -172,7 +206,65 @@ function workerTools(missionId: string): AgentTool[] {
 		},
 	} as unknown as AgentTool;
 
-	return [listTool, tailTool, askTool, steerTool];
+	const statusTool = {
+		name: "mission_status",
+		label: "status",
+		description:
+			"Read the mission's state fresh from disk: status, milestone, cost, every assertion with its current verdict and evidence, bugs, and the recent log. " +
+			"Your system prompt is a snapshot from when this session opened — use this whenever the answer depends on where things actually stand now.",
+		parameters: Type.Object({}),
+		async execute() {
+			const store = StateStore.load(outDir);
+			if (!store) return text("mission state is unreadable");
+			const st = store.state;
+			const sc = st.scoreCard;
+			return text({
+				status: st.status,
+				outcome: st.outcome ?? null,
+				verdict: st.finalVerdict ?? null,
+				milestone: st.milestones.length,
+				costUsd: Number(st.costUsd.toFixed(3)),
+				commits: st.commits.map((c) => `${c.sha.slice(0, 8)} ${c.message}`),
+				assertions: (st.plan?.contract.assertions ?? []).map((a) => ({
+					id: a.id,
+					passed: a.passed ?? null,
+					strength: a.strength ?? null,
+					addedAtMilestone: a.addedAtMilestone ?? null,
+					statement: a.statement.slice(0, 140),
+					evidence: (a.evidence ?? "").slice(0, 160),
+				})),
+				bugs: (sc?.bugs ?? []).map((b) => `[${b.severity}] ${b.summary}`),
+				openIssues: st.handoffs.flatMap((h) => h.issues.filter((i) => !i.disposition).map((i) => i.summary)),
+				recentLog: st.log.slice(-25),
+			});
+		},
+	} as unknown as AgentTool;
+
+	const diffTool = {
+		name: "worker_diff",
+		label: "diff",
+		description:
+			"What the mission has actually written in its worktree, including uncommitted work in progress. " +
+			"This is the ground truth — what a worker SAYS it is doing and what the diff shows often differ, and the diff is the honest one.",
+		parameters: Type.Object({
+			path: Type.Optional(Type.String({ description: "Limit to a path, e.g. src/validators. Omit for everything." })),
+			statOnly: Type.Optional(Type.Boolean({ description: "Just the file list and line counts. Start here on a big change." })),
+		}),
+		async execute(_id: string, p: { path?: string; statOnly?: boolean }) {
+			const store = StateStore.load(outDir);
+			const wt = store?.state.worktreePath;
+			if (!wt || !existsSync(wt)) return text("no worktree — the mission may have finished and been reclaimed");
+			const args = ["diff", store.state.baseSha ?? "HEAD", ...(p.statOnly ? ["--stat"] : []), "--", p.path ?? "."];
+			try {
+				const out = execFileSync("git", args, { cwd: wt, encoding: "utf-8", maxBuffer: 16 * 1024 * 1024 });
+				return text(out.slice(0, 12000) || "(no changes yet)");
+			} catch (err) {
+				return text(`could not read the diff: ${err instanceof Error ? err.message : String(err)}`);
+			}
+		},
+	} as unknown as AgentTool;
+
+	return [statusTool, listTool, tailTool, diffTool, askTool, steerTool];
 }
 
 /** Create a per-mission overseer agent, reusing chief agent machinery. */
@@ -198,7 +290,9 @@ export function createOverseerSession(outDir: string): OverseerSession | null {
 			systemPrompt,
 			model,
 			thinkingLevel: "off",
-			tools: workerTools(state.id),
+			// Read-only repo tools too: judging whether a worker's approach is sane needs the
+			// codebase, not just the mission's own paperwork.
+			tools: [...workerTools(state.id, outDir), ...(state.worktreePath && existsSync(state.worktreePath) ? createReadOnlyTools(state.worktreePath) : [])],
 		},
 		streamFn,
 		getApiKey: (provider) => getEnvApiKey(provider),
