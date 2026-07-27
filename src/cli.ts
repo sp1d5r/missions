@@ -1,8 +1,8 @@
 #!/usr/bin/env node
+import { getEnvApiKey } from "./pi.js";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
-import { getEnvApiKey } from "@mariozechner/pi-ai";
 import chalk from "chalk";
 import { runClient } from "./client.js";
 import { cmuxOpenBrowser, cmuxOpenDiff, hasCmuxPassword, insideCmux } from "./cmux.js";

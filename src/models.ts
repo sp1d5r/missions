@@ -1,4 +1,4 @@
-import { getEnvApiKey, type KnownProvider } from "@mariozechner/pi-ai";
+import { getEnvApiKey, type KnownProvider } from "./pi.js";
 import type { ModelRouting, ModelSpec, Provider } from "./types.js";
 
 /**

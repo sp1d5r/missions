@@ -1,9 +1,8 @@
+import { createReadOnlyTools } from "@earendil-works/pi-coding-agent";
+import { Agent, getEnvApiKey, getModel, streamFn, type AgentEvent, type AgentMessage, type AgentTool, type AssistantMessage } from "./pi.js";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
-import { Agent, type AgentEvent, type AgentMessage, type AgentTool } from "@mariozechner/pi-agent-core";
-import { type AssistantMessage, getEnvApiKey, getModel, type KnownProvider } from "@mariozechner/pi-ai";
-import { createReadOnlyTools } from "@mariozechner/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import chalk from "chalk";
 import { cmuxOpenBrowser, cmuxOpenDiff, hasCmuxPassword, insideCmux } from "./cmux.js";
 import { loadMissions } from "./dashboard.js";
@@ -175,7 +174,7 @@ export interface ChiefSession {
 /** Create the chief-of-staff brain, decoupled from any specific terminal. The daemon and the local REPL both drive this. */
 export function createChiefSession(targetCwd: string): ChiefSession {
 	const spec = autoRouting().orchestrator;
-	const model = getModel(spec.provider as KnownProvider, spec.modelId as never);
+	const model = getModel(spec.provider, spec.modelId);
 	if (!model) throw new Error(`Chief model not found: ${spec.provider}/${spec.modelId}`);
 
 	const listeners = new Set<(text: string) => void>();
@@ -186,6 +185,7 @@ export function createChiefSession(targetCwd: string): ChiefSession {
 	let runnerRef: MissionRunner;
 	const agent = new Agent({
 		initialState: { systemPrompt: SYSTEM_PROMPT, model, thinkingLevel: "off", tools: buildTools(targetCwd, () => runnerRef) },
+		streamFn,
 		getApiKey: (provider) => getEnvApiKey(provider),
 	});
 

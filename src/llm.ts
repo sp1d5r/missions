@@ -1,12 +1,12 @@
-import { completeSimple, getEnvApiKey, getModel, type KnownProvider } from "@mariozechner/pi-ai";
+import { completeSimple, getEnvApiKey, getModel } from "./pi.js";
 import type { ModelSpec } from "./types.js";
 
 /** Single tool-less completion. Mirrors council's completeToolless. */
 export async function complete(spec: ModelSpec, systemPrompt: string, userPrompt: string): Promise<{ text: string; costUsd: number }> {
-	const model = getModel(spec.provider as KnownProvider, spec.modelId as never);
+	const model = getModel(spec.provider, spec.modelId);
 	if (!model) throw new Error(`Model not found: ${spec.provider}/${spec.modelId}. Check packages/ai/src/models.generated.ts.`);
 
-	const apiKey = getEnvApiKey(spec.provider as KnownProvider);
+	const apiKey = getEnvApiKey(spec.provider);
 	const result = await completeSimple(
 		model,
 		{ systemPrompt, messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }] },

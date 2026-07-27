@@ -1,6 +1,5 @@
-import { Agent, type AgentEvent, type AgentMessage } from "@mariozechner/pi-agent-core";
-import { type AssistantMessage, getEnvApiKey, getModel, type KnownProvider } from "@mariozechner/pi-ai";
-import { createCodingTools } from "@mariozechner/pi-coding-agent";
+import { createCodingTools } from "@earendil-works/pi-coding-agent";
+import { Agent, getEnvApiKey, getModel, streamFn, type AgentEvent, type AgentMessage, type AssistantMessage } from "./pi.js";
 import { parseJson } from "./llm.js";
 import type { Assertion, CommandRecord, Feature, Handoff, HandoffIssue, ModelSpec } from "./types.js";
 
@@ -79,7 +78,7 @@ export interface RunWorkerOptions {
 export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult> {
 	const { feature, assertions, milestone, cwd, model: spec, budgetUsd, env, envDoctrine, onProgress } = options;
 
-	const model = getModel(spec.provider as KnownProvider, spec.modelId as never);
+	const model = getModel(spec.provider, spec.modelId);
 	if (!model) throw new Error(`Worker model not found: ${spec.provider}/${spec.modelId}`);
 
 	const agent = new Agent({
@@ -91,6 +90,7 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult
 			// every bash command the worker runs gets the mission's env, not the daemon's.
 			tools: createCodingTools(cwd, env ? { bash: { spawnHook: (ctx) => ({ ...ctx, env }) } } : undefined),
 		},
+		streamFn,
 		getApiKey: (provider) => getEnvApiKey(provider),
 	});
 
