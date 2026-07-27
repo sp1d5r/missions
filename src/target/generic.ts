@@ -1,14 +1,70 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import type { BehavioralResult, Target, WorktreeBootstrapSpec } from "./types.js";
 
-/** Gitignored things almost every repo has and no worktree inherits. Missing entries are skipped. */
-const COMMON_ENV_FILES = [".env", ".env.local"];
-// Venvs bake absolute paths into their scripts, so they are shared read-only.
-const COMMON_LINK_DIRS = [".venv", "venv"];
-// node_modules is what a worker installs into — cloned so an install stays in this worktree.
-const COMMON_CLONE_DIRS = ["node_modules"];
+/**
+ * Repo-shaped facts that are cheaper to observe than to declare.
+ *
+ * There used to be a per-repo adapter here holding hand-written lists of env files, venvs,
+ * node_modules and source roots. It described exactly one repo, went stale (its source-root list
+ * was missing `queue_service/src` and nobody noticed), and it inherited dependency state from the
+ * main checkout instead of setting the worktree up properly.
+ *
+ * Dependencies are now the setup stage's job (see setup.ts). What remains here is the one thing
+ * setup cannot produce: secrets. Env files are gitignored, so a worktree never inherits them and
+ * no install can recreate them — they have to be copied from the main checkout.
+ */
 
+/** Env files a worktree needs. Discovered: gitignored, present, and named like an env file. */
+export function discoverEnvFiles(repoCwd: string): string[] {
+	const candidates: string[] = [];
+	// `.env`, `.env.local`, `.env.production` — but not templates (nothing secret in them, and
+	// they are usually tracked) and not backups. A stale `.env.naomi-e2e.backup` copied into a
+	// worktree is live credentials nobody asked for, sitting where a worker might read them.
+	const looksLikeEnv = (name: string) =>
+		/^\.env(\..+)?$/.test(name) && !/\.(example|sample|template|bak|backup|old|orig)$/.test(name);
+
+	const scan = (dirRel: string) => {
+		const abs = dirRel ? join(repoCwd, dirRel) : repoCwd;
+		let entries: import("node:fs").Dirent[] = [];
+		try {
+			entries = readdirSync(abs, { withFileTypes: true });
+		} catch {
+			return;
+		}
+		for (const e of entries) {
+			if (e.isFile() && looksLikeEnv(e.name)) candidates.push(dirRel ? join(dirRel, e.name) : e.name);
+		}
+	};
+
+	scan("");
+	try {
+		for (const e of readdirSync(repoCwd, { withFileTypes: true })) {
+			if (e.isDirectory() && !e.name.startsWith(".") && e.name !== "node_modules") scan(e.name);
+		}
+	} catch {
+		/* unreadable tree */
+	}
+	if (!candidates.length) return [];
+
+	// Only gitignored ones. A committed .env is already in the worktree, and copying a tracked
+	// file over itself would show up as a spurious diff.
+	try {
+		const res = execFileSync("git", ["check-ignore", "--stdin"], {
+			cwd: repoCwd,
+			input: candidates.join("\n"),
+			encoding: "utf-8",
+			stdio: ["pipe", "pipe", "ignore"],
+		});
+		return res.split("\n").map((l) => l.trim()).filter(Boolean).sort();
+	} catch (err) {
+		// git check-ignore exits 1 when nothing matched — that is an answer, not a failure.
+		const out = (err as { stdout?: string }).stdout;
+		return typeof out === "string" ? out.split("\n").map((l) => l.trim()).filter(Boolean).sort() : [];
+	}
+}
+
+/** A short top-level summary of the repo, handed to the orchestrator so it can plan. */
 export function topLevelRecon(cwd: string): string {
 	const entries = readdirSync(cwd, { withFileTypes: true })
 		.filter((e) => !e.name.startsWith(".") && e.name !== "node_modules")
@@ -22,33 +78,3 @@ export function topLevelRecon(cwd: string): string {
 	}
 	return lines.join("\n");
 }
-
-export const genericTarget: Target = {
-	name: "generic",
-	recon: topLevelRecon,
-	defaultCheckCommand(cwd) {
-		if (existsSync(join(cwd, "package.json"))) {
-			try {
-				const pkg = JSON.parse(readFileSync(join(cwd, "package.json"), "utf-8")) as { scripts?: Record<string, string> };
-				if (pkg.scripts?.test) return "npm test";
-				if (pkg.scripts?.typecheck) return "npm run typecheck";
-			} catch {
-				/* ignore */
-			}
-		}
-		return undefined;
-	},
-	bootstrapSpec(cwd): WorktreeBootstrapSpec {
-		// Only top level, and only what is actually there — a generic repo gets no guesses
-		// about its layout, just the env and dependency dirs a worktree provably lacks.
-		return {
-			envFiles: COMMON_ENV_FILES.filter((f) => existsSync(join(cwd, f))),
-			linkDirs: COMMON_LINK_DIRS.filter((d) => existsSync(join(cwd, d))),
-			cloneDirs: COMMON_CLONE_DIRS.filter((d) => existsSync(join(cwd, d))),
-			sourceRoots: [],
-		};
-	},
-	async runBehavioral(): Promise<BehavioralResult> {
-		return { ran: false, passed: true, evidence: "No behavioral adapter for generic target (skipped)." };
-	},
-};

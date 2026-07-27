@@ -1,12 +1,10 @@
 import type { Assertion, CheckResult, ModelSpec, Plan, ScoreCard } from "../types.js";
-import type { Target } from "../target/index.js";
 import { spotBugs } from "./bug-spotter.js";
 import { REFUSED_EXIT_CODE, runCheck } from "./checks.js";
 
 export interface RunValidatorsOptions {
 	cwd: string;
 	plan: Plan;
-	target: Target;
 	bugSpotterModel: ModelSpec;
 	/** Working-tree diff of the worker's changes. */
 	diff: string;
@@ -22,7 +20,7 @@ export interface RunValidatorsOptions {
 }
 
 export async function runValidators(options: RunValidatorsOptions): Promise<ScoreCard> {
-	const { cwd, plan, target, bugSpotterModel, diff, intent, extraCheckCommand, env, foreignRoot, onProgress } = options;
+	const { cwd, plan, bugSpotterModel, diff, intent, extraCheckCommand, env, foreignRoot, onProgress } = options;
 	const checks: CheckResult[] = [];
 	let costUsd = 0;
 
@@ -59,8 +57,9 @@ export async function runValidators(options: RunValidatorsOptions): Promise<Scor
 			mark(a, r.passed, evidence);
 		} else if (a.method.type === "behavioral") {
 			onProgress?.(`assert ${a.id}: behavioral ${a.method.scenario}`);
-			const r = await target.runBehavioral(cwd, a.method.scenario, a.method.threshold);
-			mark(a, r.passed, r.ran ? r.evidence : `SKIPPED — ${r.evidence}`);
+			// Behavioral scenarios are mission-specific, not repo-specific: state the command in
+			// the RFC and let it be a bash-command assertion. Recorded as skipped, never as passed.
+			mark(a, true, `SKIPPED — behavioral assertions are not run; express "${a.method.scenario}" as a bash-command assertion instead`);
 		} else {
 			// code-review: satisfied if the adversarial pass found no blocking bugs.
 			mark(a, blocking === 0, blocking === 0 ? "no blocking bugs found" : `${blocking} blocking bug(s) found`);

@@ -5,9 +5,11 @@ import { createInterface } from "node:readline/promises";
 import { Type } from "typebox";
 import chalk from "chalk";
 import { cmuxOpenBrowser, cmuxOpenDiff, hasCmuxPassword, insideCmux } from "./cmux.js";
+import { mergeBranch } from "./git.js";
+import { reclaimBranch, reclaimWorktree } from "./lifecycle.js";
 import { runMission } from "./mission.js";
 import { autoRouting } from "./models.js";
-import { readActive } from "./registry.js";
+import { readActive, updateActive } from "./registry.js";
 import { renderSweep, sweep } from "./lifecycle.js";
 import { dispatchScouts, loadAgentSpecs } from "./subagent.js";
 import { listWorkspaces, registerWorkspace, resolveWorkspace, workspaceNames } from "./workspaces.js";
@@ -24,6 +26,9 @@ Workspaces:
 How to behave:
 - Infer intent. Propose a crisp plan in 1-2 lines. When the ask is clear, call run_mission to dispatch a worker — it runs in the BACKGROUND, so say you've kicked it off and keep talking.
 - Missions run in PARALLEL, each in its own git worktree (a few at once). Dispatch several pieces of work concurrently.
+- run_mission is for WRITING CODE. Never dispatch one for a deterministic local operation — merging, cleaning up,
+  listing. Those have their own tools (accept_mission, reclaim_disk, list_missions). A worker cannot run git at all,
+  so a mission asked to merge will produce a document describing a merge instead of doing one.
 - Ask a clarifying question ONLY when you truly cannot proceed. One question, never a checklist. The exception: if you cannot tell WHICH repo the user means, ask — dispatching into the wrong repo is expensive to undo.
 - You can read the current repo directly (read/grep/find/ls). For any OTHER repo, use investigate — it sends read-only scouts and returns their answers without filling your context.
 - Keep every reply short and skimmable. No walls of text.
@@ -245,6 +250,40 @@ function buildTools(focus: () => string, runner: () => MissionRunner): AgentTool
 		},
 	} as unknown as AgentTool;
 
+	const acceptTool = {
+		name: "accept_mission",
+		label: "accept",
+		description:
+			"Merge a finished mission's branch into its repo's checked-out branch, then reclaim the worktree and delete the branch. " +
+			"This is the same action the board's 'a' key performs. Use it whenever the user asks to merge, accept, land or ship a mission. " +
+			"NEVER dispatch a mission to do a merge — merging is a deterministic git operation, and a worker cannot run git anyway.",
+		parameters: Type.Object({
+			missionId: Type.String({ description: "The mission id, or enough of its prefix to be unambiguous." }),
+		}),
+		async execute(_id: string, params: { missionId: string }) {
+			const matches = readActive().filter((r) => r.id === params.missionId || r.id.startsWith(params.missionId));
+			if (!matches.length) return { content: [{ type: "text", text: `No mission matching "${params.missionId}". Use list_missions to see ids.` }] };
+			if (matches.length > 1) {
+				return { content: [{ type: "text", text: `"${params.missionId}" matches ${matches.length} missions: ${matches.map((m) => m.id).join(", ")}. Be more specific.` }] };
+			}
+			const r = matches[0];
+			if (!r) return { content: [{ type: "text", text: `No mission matching "${params.missionId}".` }] };
+			if (!r.done) return { content: [{ type: "text", text: `Mission ${r.id} is still ${r.status}. Wait for it to finish before merging.` }] };
+
+			const branch = `missions/${r.id}`;
+			const res = mergeBranch(r.repo, branch);
+			if (!res.ok) {
+				// Report git's own words. The usual cause is uncommitted local changes to a file the
+				// branch also touched, which the user must resolve — not something to dispatch an agent at.
+				return { content: [{ type: "text", text: `Merge of ${branch} into ${r.repoName} FAILED.\n\n${res.out.slice(0, 600)}\n\nNothing was changed. Resolve this in the repo, then ask me again.` }] };
+			}
+			const wt = r.worktreePath ? reclaimWorktree(r.repo, r.worktreePath, "merged") : { bytes: 0 };
+			reclaimBranch(r.repo, branch);
+			updateActive(r.id, { cleared: true, status: "merged" });
+			return { content: [{ type: "text", text: `Merged ${branch} → ${r.repoName}${wt.bytes ? ` (${Math.round(wt.bytes / 1e6)}MB reclaimed)` : ""}. Worktree removed, branch deleted.` }] };
+		},
+	} as unknown as AgentTool;
+
 	const boardTool = {
 		name: "board_hint",
 		label: "board",
@@ -256,7 +295,7 @@ function buildTools(focus: () => string, runner: () => MissionRunner): AgentTool
 	} as unknown as AgentTool;
 
 	// Direct read tools follow the focus repo; everything else takes a repo argument.
-	return [...createReadOnlyTools(focus()), runMissionTool, listTool, workspacesTool, investigateTool, gcTool, boardTool];
+	return [...createReadOnlyTools(focus()), runMissionTool, acceptTool, listTool, workspacesTool, investigateTool, gcTool, boardTool];
 }
 
 export interface ChiefSession {

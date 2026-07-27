@@ -9,7 +9,8 @@ import { type CorrectionRuling, planMission, scopeCorrections } from "./orchestr
 import { writeActive, repoName } from "./registry.js";
 import { generateReport } from "./report.js";
 import { StateStore } from "./state.js";
-import { getTarget } from "./target/index.js";
+import { topLevelRecon } from "./target/index.js";
+import { runSetup } from "./setup.js";
 import type { Feature, Handoff, MilestoneRecord, MilestoneVerdict, MissionConfig, MissionState, ScoreCard } from "./types.js";
 import { loadAgentSpecs } from "./subagent.js";
 import { runValidators } from "./validators/index.js";
@@ -24,7 +25,6 @@ const MILESTONE_BUDGET_FLOOR = 0.15;
 
 export async function runMission(config: MissionConfig, onEvent?: (e: MissionEvent) => void): Promise<MissionState> {
 	const store = StateStore.create(config.outDir, config);
-	const target = getTarget(config.target);
 	const intent = `GOAL: ${config.goal}\n\nRFC: ${config.rfc}`;
 	const maxMilestones = Math.max(1, config.maxMilestones ?? 3);
 	/** Set when a branched database was provisioned for this mission's schema work. */
@@ -77,7 +77,6 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 		const branch = useWorktree ? `missions/${store.state.id}` : config.branch;
 		store.state.branch = branch;
 
-		const spec = target.bootstrapSpec(config.targetCwd);
 		let workCwd = config.targetCwd;
 		let sourceRoots: string[] = [];
 		// Dependency bin dirs for PATH — without these a bare `python` is the machine's, not this tree's.
@@ -90,22 +89,37 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 			store.state.worktreePath = workCwd;
 			emit(`worktree ${branch} @ ${baseSha.slice(0, 8)} → ${workCwd}`);
 
-			// `git worktree add` carries tracked files and nothing else. Everything gitignored that
-			// the tree needs to actually RUN — env files, venvs, node_modules — is placed here.
-			const boot = await bootstrapWorktree({ targetCwd: config.targetCwd, workCwd, spec });
-			sourceRoots = boot.sourceRoots;
-			binDirs = boot.binDirs;
+			// `git worktree add` carries tracked files and nothing else. Secrets are the one thing
+			// no install can recreate, so they are copied; dependencies are the setup stage's job.
+			const boot = bootstrapWorktree({ targetCwd: config.targetCwd, workCwd });
 			gitExcludes = boot.gitExcludes;
 			for (const note of boot.notes) emit(`  bootstrap: ${note}`);
 		} else {
-			// Working in the main checkout: env and deps are already there, so only the source
-			// roots matter. Nothing was placed by us, so nothing needs excluding from commits.
 			ensureBranch(config.targetCwd, branch);
-			const boot = await bootstrapWorktree({ targetCwd: config.targetCwd, workCwd, spec });
-			sourceRoots = boot.sourceRoots;
-			binDirs = boot.binDirs;
+			bootstrapWorktree({ targetCwd: config.targetCwd, workCwd });
 			emit(`branch ${branch} @ ${baseSha.slice(0, 8)} in ${config.targetCwd}`);
 		}
+		store.save();
+
+		// Stage 0 — install the tree properly rather than inheriting an install, and let the repo's
+		// own setup doc get corrected when it turns out to be wrong. Replay makes the common case
+		// deterministic and free; the agent only wakes on a first run, changed lockfiles, or a
+		// failed replay. PATH and PYTHONPATH then come from what setup actually produced.
+		setStatus("planning");
+		const setup = await runSetup({
+			targetCwd: config.targetCwd,
+			workCwd,
+			model: config.routing.worker,
+			env: resolveMissionEnv({ targetCwd: config.targetCwd, workCwd, missionId: store.state.id, sourceRoots: [] }),
+			onProgress: (m) => emit(`  setup: ${m}`),
+		});
+		sourceRoots = setup.sourceRoots;
+		binDirs = setup.binDirs;
+		store.state.costUsd += setup.costUsd;
+		emit(`setup ${setup.ok ? "ok" : "INCOMPLETE"} (${setup.mode}) — ${setup.steps.length} step(s), ${binDirs.length} bin dir(s), ${sourceRoots.length} source root(s)`);
+		if (setup.docUpdated) emit(`  setup: corrected the repo's setup doc → ${setup.docUpdated}`);
+		for (const n of setup.notes) emit(`  setup: ${n}`);
+		if (!setup.ok) emit("  ⚠ setup did not fully succeed — commands needing dependencies may fail");
 		store.save();
 
 		// The env every worker command and every assertion check runs under. Explicit, so that
@@ -122,9 +136,10 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 		// 1. Plan — the validation contract is written here, before any code exists.
 		setStatus("planning");
 		emit("orchestrator planning…");
-		const { plan, costUsd: planCost } = await planMission(config, target.recon(workCwd), {
+		const { plan, costUsd: planCost } = await planMission(config, topLevelRecon(workCwd), {
 			workCwd,
-			envDoctrine: target.envDoctrine,
+			// Doctrine now comes from the repo's own AGENTS.md, which workers load directly.
+			envDoctrine: undefined,
 		});
 		store.state.plan = plan;
 		store.state.costUsd += planCost;
@@ -217,9 +232,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 					budgetUsd: Math.min(remaining, config.budgetUsd * 0.6),
 					env: missionEnv,
 					scouts,
-					envDoctrine: [target.envDoctrine, schemaWarning && `HARNESS WARNING: ${schemaWarning}`]
-						.filter(Boolean)
-						.join("\n"),
+					envDoctrine: schemaWarning ? `HARNESS WARNING: ${schemaWarning}` : undefined,
 					onProgress: (e) => {
 						if (e.type === "tool") onEvent?.({ type: "log", message: `  ${feature.id} → ${e.toolName}` });
 					},
@@ -258,11 +271,11 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 			scoreCard = await runValidators({
 				cwd: workCwd,
 				plan,
-				target,
 				bugSpotterModel: config.routing.bugSpotter,
 				diff,
 				intent,
-				extraCheckCommand: config.checkCommand ?? target.defaultCheckCommand(workCwd),
+				// The repo's own verify step, discovered by setup, is a better default than a guess.
+				extraCheckCommand: config.checkCommand ?? setup.verifyCommand,
 				env: missionEnv,
 				// Assertions that reach back into the main checkout are refused rather than run,
 				// so a mission can no longer score itself against a tree it never touched.

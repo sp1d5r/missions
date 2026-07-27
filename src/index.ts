@@ -6,6 +6,7 @@ export { runValidators } from "./validators/index.js";
 export { generateReport } from "./report.js";
 export { runChief } from "./chief.js";
 export { generateDashboard, loadMissions } from "./dashboard.js";
-export { getTarget } from "./target/index.js";
+export { discoverEnvFiles, topLevelRecon } from "./target/index.js";
+export { runSetup, observeProduced, findSetupDoc } from "./setup.js";
 export { DEFAULT_ROUTING, ANTHROPIC_ONLY_ROUTING, autoRouting, parseModelSpec } from "./models.js";
 export * from "./types.js";

@@ -9,7 +9,8 @@ const { bootstrapWorktree, applyEnvOverrides } = await import(`${M}/bootstrap.js
 const { commitAll } = await import(`${M}/git.js`);
 const { resolveMissionEnv, parseEnvFile } = await import(`${M}/env.js`);
 const { runCheck, REFUSED_EXIT_CODE } = await import(`${M}/validators/checks.js`);
-const { getTarget } = await import(`${M}/target/index.js`);
+const { discoverEnvFiles } = await import(`${M}/target/index.js`);
+const { observeProduced } = await import(`${M}/setup.js`);
 const { planTouchesSchema } = await import(`${M}/db-branch.js`);
 
 const REPO = "/Users/elijahahmad/nadine";
@@ -45,17 +46,16 @@ const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO, encoding: "
 execFileSync("git", ["worktree", "add", "-b", BRANCH, WT, base], { cwd: REPO, stdio: "ignore" });
 
 try {
-	const target = getTarget("nadine");
-	const spec = target.bootstrapSpec(REPO);
+	// Env files are discovered now, not declared. Prove the discovery before using it.
+	const discovered = discoverEnvFiles(REPO);
+	check("env files are DISCOVERED, not declared", discovered.includes(".env") && discovered.includes("naomi-web/.env.local"), discovered.join(", "));
+	check("secrets backups are excluded from discovery", !discovered.some((f) => /\.(backup|bak|example)$/.test(f)));
 
 	// Baseline: a bare worktree is unrunnable. This is what workers used to get.
 	check("bare worktree has no .env", !existsSync(join(WT, ".env")));
 	check("bare worktree has no backend/.venv", !existsSync(join(WT, "backend/.venv")));
 
-	// MUST await: bootstrapWorktree became async when cloning went concurrent. Without this the
-	// clones keep running in the background while the script races on to teardown, which deletes
-	// a tree mid-copy and surfaces as a confusing ENOTEMPTY rather than "you forgot an await".
-	const boot = await bootstrapWorktree({ targetCwd: REPO, workCwd: WT, spec });
+	const boot = bootstrapWorktree({ targetCwd: REPO, workCwd: WT });
 	console.log(`\n  bootstrap notes:\n${boot.notes.map((n) => `    - ${n}`).join("\n")}\n`);
 
 	// 1. Env files land as real copies.
@@ -69,20 +69,27 @@ try {
 	check("website/.env.local copied in", existsSync(join(WT, "website/.env.local")));
 
 	// 2. Deps arrive as symlinks, not copies.
-	const venvLinked = existsSync(join(WT, "backend/.venv")) && lstatSync(join(WT, "backend/.venv")).isSymbolicLink();
-	check("backend/.venv is a symlink to the main checkout", venvLinked);
-	check("pi-mono sibling checkout linked", existsSync(join(WT, "pi-mono")));
+	// Dependencies are NOT inherited any more — setup installs them. A bare worktree having no
+	// venv is now the correct state, not a bug.
+	check("dependencies are NOT inherited from the main checkout", !existsSync(join(WT, "backend/.venv")));
+	check("observeProduced finds nothing in an un-set-up tree", observeProduced(WT).binDirs.length === 0);
+	const mainProduced = observeProduced(REPO);
+	check("observeProduced reads source roots from .pth in a set-up tree", mainProduced.sourceRoots.length >= 4, `${mainProduced.sourceRoots.length} roots, ${mainProduced.binDirs.length} bin dirs`);
+	check("discovered source roots include one the old hardcoded list missed", mainProduced.sourceRoots.some((r) => r.endsWith("queue_service/src")));
 
-	// 3. The bootstrapped paths must never reach a commit. nadine's .gitignore uses
-	//    directory-only patterns (node_modules/, pi-mono/) which do NOT match symlinks, so this
-	//    relies on the harness's own exclusions rather than the repo's ignore rules.
+	// 3. Bootstrap must leave the tree clean. This flipped when dependency inheritance was
+	//    removed: symlinked node_modules/pi-mono showed as untracked (a repo's directory-only
+	//    ignore patterns do not match a symlink), so the harness needed its own exclusions.
+	//    Now only env files are placed, and those are gitignored by definition — we discover
+	//    them BY asking git whether they are ignored. So a dirty tree here would mean bootstrap
+	//    put something where it does not belong.
 	const unignored = execFileSync("git", ["status", "--porcelain"], { cwd: WT, encoding: "utf-8" })
 		.trim()
 		.split("\n")
 		.filter(Boolean);
 	check(
-		"some bootstrapped paths are NOT covered by the repo's .gitignore (why excludes are needed)",
-		unignored.length > 0,
+		"bootstrap leaves the worktree git-clean (nothing placed that git cannot ignore)",
+		unignored.length === 0,
 		unignored.map((l) => l.slice(3)).join(", "),
 	);
 	check(
@@ -103,8 +110,12 @@ try {
 	);
 
 	// 4. The crux: python must resolve inside the worktree, not via the venv's baked-in .pth.
-	const env = resolveMissionEnv({ targetCwd: REPO, workCwd: WT, missionId: ID, sourceRoots: boot.sourceRoots });
-	const py = join(WT, "backend/.venv/bin/python");
+	// Source roots come from observing the SET-UP main checkout, rewritten to point at the worktree —
+	// which is what setup will produce once it has installed into the worktree itself.
+	const roots = mainProduced.sourceRoots.map((r) => r.replace(REPO, WT)).filter((r) => existsSync(r));
+	const env = resolveMissionEnv({ targetCwd: REPO, workCwd: WT, missionId: ID, sourceRoots: roots });
+	check("package-manager caches are shared, not per-worktree", Boolean(env.PDM_CACHE_DIR && env.PNPM_STORE_DIR), env.PDM_CACHE_DIR ?? "");
+	const py = join(REPO, "backend/.venv/bin/python");
 	const probe = "import nadine_shared, app; print(nadine_shared.__file__); print(app.__file__)";
 	const out = execFileSync(py, ["-c", probe], { cwd: WT, env, encoding: "utf-8" });
 	const [sharedPath, appPath] = out.trim().split("\n").filter((l) => l.startsWith("/"));

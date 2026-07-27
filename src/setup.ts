@@ -72,6 +72,8 @@ export interface SetupResult {
 	sourceRoots: string[];
 	/** Set when the agent edited the repo's setup doc. Worth surfacing: it is a real contribution. */
 	docUpdated?: string;
+	/** The repo's own smoke check, as reported by setup. A better default than the harness guessing. */
+	verifyCommand?: string;
 	notes: string[];
 	costUsd: number;
 	error?: string;
@@ -286,7 +288,7 @@ export async function runSetup(options: RunSetupOptions): Promise<SetupResult> {
 		}
 		if (allOk) {
 			const produced = observeProduced(workCwd);
-			return { ok: true, mode: "replay", steps, ...produced, notes, costUsd: 0 };
+			return { ok: true, mode: "replay", steps, ...produced, verifyCommand: verifyOf(record.verify), notes, costUsd: 0 };
 		}
 		// Fall through to the agent — a failed replay means the world moved and the doc,
 		// or our record of it, needs repairing.
@@ -371,11 +373,18 @@ Set it up, verify it, correct the doc if it was wrong, then emit your setup bloc
 		ok: Boolean(parsed.ok),
 		mode: "agent",
 		steps: parsed.steps ?? [],
+		verifyCommand: verifyOf(parsed.verify ?? undefined),
 		...produced,
 		docUpdated: parsed.docUpdated ?? undefined,
 		notes,
 		costUsd,
 	};
+}
+
+/** A verify step becomes a shell command the validator can run from the worktree root. */
+function verifyOf(step?: SetupStep | null): string | undefined {
+	if (!step?.cmd) return undefined;
+	return step.dir && step.dir !== "." ? `cd ${step.dir} && ${step.cmd}` : step.cmd;
 }
 
 interface RawSetup {

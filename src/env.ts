@@ -1,4 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 // Per-mission environment resolution.
 //
@@ -89,6 +91,25 @@ export function resolveMissionEnv(options: ResolveMissionEnvOptions): NodeJS.Pro
 	if (sourceRoots.length) {
 		// Prepend, so the worktree wins over both site-packages and any ambient PYTHONPATH.
 		env.PYTHONPATH = [...sourceRoots, env.PYTHONPATH].filter(Boolean).join(":");
+	}
+
+	// Point every package manager at a shared, immutable cache.
+	//
+	// Setting a worktree up properly means a real install per mission, which is only affordable
+	// because package managers are built to resolve from a global store: pnpm hardlinks from a
+	// content-addressed store, and pip/pdm/uv skip the download entirely on a cache hit. Without
+	// this, six parallel missions each re-download the world. The cache is shared but append-only
+	// by nature, so it does not reintroduce the shared MUTABLE state that inheriting deps had.
+	const cacheRoot = join(homedir(), ".missions", "pkg-cache");
+	for (const [key, sub] of [
+		["PDM_CACHE_DIR", "pdm"],
+		["UV_CACHE_DIR", "uv"],
+		["PIP_CACHE_DIR", "pip"],
+		["PNPM_STORE_DIR", "pnpm"],
+		["npm_config_cache", "npm"],
+		["YARN_CACHE_FOLDER", "yarn"],
+	] as const) {
+		if (!env[key]) env[key] = join(cacheRoot, sub);
 	}
 
 	if (binDirs?.length) {
