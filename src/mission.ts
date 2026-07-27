@@ -13,6 +13,7 @@ import { topLevelRecon } from "./target/index.js";
 import { runSetup } from "./setup.js";
 import type { Feature, Handoff, MilestoneRecord, MilestoneVerdict, MissionConfig, MissionState, ScoreCard } from "./types.js";
 import { loadAgentSpecs } from "./subagent.js";
+import { annotateVerdict } from "./validators/checks.js";
 import { runValidators } from "./validators/index.js";
 import { runWorker } from "./worker.js";
 
@@ -450,7 +451,9 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 		emit(`report → ${reportPath}`);
 
 		setStatus("succeeded");
-		const finalMsg = `mission ${verdict === "passed" ? "CLEAN" : `NEEDS YOU (${verdict})`} — $${store.state.costUsd.toFixed(2)} over ${store.state.milestones.length} milestone(s)`;
+		const baseVerdict = verdict === "passed" ? "CLEAN" : `NEEDS YOU (${verdict})`;
+		const annotated = annotateVerdict(baseVerdict, scoreCard);
+		const finalMsg = `mission ${annotated} — $${store.state.costUsd.toFixed(2)} over ${store.state.milestones.length} milestone(s)`;
 		emit(finalMsg);
 		store.appendEvent("lifecycle", finalMsg);
 	} catch (err) {

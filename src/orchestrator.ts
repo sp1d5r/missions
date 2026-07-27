@@ -1,5 +1,5 @@
 import { complete, parseJson } from "./llm.js";
-import type { Assertion, Feature, Handoff, IssueDisposition, MissionConfig, Plan, ScoreCard } from "./types.js";
+import type { Assertion, AssertionStrength, Feature, Handoff, IssueDisposition, MissionConfig, Plan, ScoreCard } from "./types.js";
 
 const SYSTEM_PROMPT = `You are the ORCHESTRATOR of an autonomous engineering org working on a target code repository.
 A human engineer hands you a GOAL and an RFC (their "here is what is wrong / what I want" notes). You do NOT write code.
@@ -21,6 +21,24 @@ Principles:
   before finishing). The worker reports whether it followed them. Use them where a feature has a sharp edge.
 - Keep it tight. 1-3 features for a first pass unless the goal clearly needs more.
 
+Every assertion MUST carry a "strength" field — this is required for the verdict to be honest.
+The three allowed values and their exact semantics:
+- "behavioural": the command actually EXECUTES the feature (calls the code, runs the binary, exercises real
+  logic). Only a passing behavioural assertion suppresses the existence-only warning in the final verdict.
+  Example: node dist/cli.js view "$RUN_ID" --json | jq -e '.timeline | length > 0'
+- "existence": the command only inspects the filesystem without executing the feature (file present, symbol
+  exported, pattern grep'd). Does NOT suppress the existence-only warning on its own.
+  Example: test -f src/mission-view.ts && grep -q 'export' src/mission-view.ts
+- "review": a human or LLM reads the diff and judges it. Always use this for code-review method assertions.
+  Does NOT suppress the existence-only warning on its own.
+
+Aim for at least one "behavioural" assertion per feature where a testable surface exists. An existence-only run
+prints a warning in the final verdict. The harness auto-corrects declared "behavioural" to "existence" if the
+command is purely filesystem-inspection (test, ls, stat, find, grep, cat, head, wc, etc.) — so declare honestly.
+Note: "behavioral" method assertions (end-to-end scenarios) are SKIPPED by the harness and counted as NOT
+passed — they never satisfy the behavioural strength requirement. Use bash-command with strength "behavioural"
+for executable checks.
+
 Output ONLY a JSON object, no prose, in exactly this shape:
 {
   "summary": "one paragraph: what we will do and why",
@@ -31,10 +49,14 @@ Output ONLY a JSON object, no prose, in exactly this shape:
   ],
   "contract": {
     "assertions": [
-      { "id": "a1", "statement": "observable claim that must hold",
-        "method": { "type": "bash-command", "command": "npm test", "expectedExitCode": 0 } }
-      // or { "type": "code-review", "focus": "..." }
-      // or { "type": "behavioral", "scenario": "scenario-name-or-path", "threshold": 0.5 }
+      { "id": "a1", "statement": "observable claim that must hold", "strength": "behavioural",
+        "method": { "type": "bash-command", "command": "npm test", "expectedExitCode": 0 } },
+      { "id": "a2", "statement": "file exists and is importable", "strength": "existence",
+        "method": { "type": "bash-command", "command": "test -f src/foo.ts", "expectedExitCode": 0 } },
+      { "id": "a3", "statement": "reviewer confirms the design", "strength": "review",
+        "method": { "type": "code-review", "focus": "..." } },
+      { "id": "a4", "statement": "scenario passes", "strength": "behavioural",
+        "method": { "type": "behavioral", "scenario": "scenario-name-or-path", "threshold": 0.5 } }
     ]
   }
 }`;
@@ -81,7 +103,24 @@ Produce the plan + validation contract now. At most ${config.maxFeatures} featur
 			assertionIds: Array.isArray(f.assertionIds) ? f.assertionIds : [],
 			procedures: Array.isArray(f.procedures) ? f.procedures.filter((p) => typeof p === "string") : undefined,
 		})),
-		contract: { assertions: Array.isArray(parsed.contract.assertions) ? parsed.contract.assertions : [] },
+		contract: {
+			assertions: Array.isArray(parsed.contract.assertions)
+				? parsed.contract.assertions.map((raw) => {
+						const a = raw as Partial<Assertion> & { method?: unknown };
+						const validStrengths: AssertionStrength[] = ["behavioural", "existence", "review"];
+						const strength: AssertionStrength | undefined =
+							typeof a.strength === "string" && validStrengths.includes(a.strength as AssertionStrength)
+								? (a.strength as AssertionStrength)
+								: undefined; // missing or invalid = undefined, not a crash
+						return {
+							id: typeof a.id === "string" ? a.id : "",
+							statement: typeof a.statement === "string" ? a.statement : "",
+							method: a.method as Assertion["method"],
+							...(strength !== undefined ? { strength } : {}),
+						};
+					})
+				: [],
+		},
 	};
 	return { plan, costUsd };
 }
