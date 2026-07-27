@@ -88,7 +88,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 
 			// `git worktree add` carries tracked files and nothing else. Everything gitignored that
 			// the tree needs to actually RUN — env files, venvs, node_modules — is placed here.
-			const boot = bootstrapWorktree({ targetCwd: config.targetCwd, workCwd, spec });
+			const boot = await bootstrapWorktree({ targetCwd: config.targetCwd, workCwd, spec });
 			sourceRoots = boot.sourceRoots;
 			gitExcludes = boot.gitExcludes;
 			for (const note of boot.notes) emit(`  bootstrap: ${note}`);
@@ -96,7 +96,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 			// Working in the main checkout: env and deps are already there, so only the source
 			// roots matter. Nothing was placed by us, so nothing needs excluding from commits.
 			ensureBranch(config.targetCwd, branch);
-			sourceRoots = bootstrapWorktree({ targetCwd: config.targetCwd, workCwd, spec }).sourceRoots;
+			sourceRoots = (await bootstrapWorktree({ targetCwd: config.targetCwd, workCwd, spec })).sourceRoots;
 			emit(`branch ${branch} @ ${baseSha.slice(0, 8)} in ${config.targetCwd}`);
 		}
 		store.save();

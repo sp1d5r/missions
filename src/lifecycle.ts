@@ -204,6 +204,59 @@ export function sweep(options: SweepOptions = {}): SweepResult {
 	return result;
 }
 
+/**
+ * Prune the shared package-manager caches.
+ *
+ * This is the one thing a mission leaves OUTSIDE its worktree. Every install a
+ * worker runs pulls packages into a machine-wide store, and those survive the
+ * worktree that asked for them — measured on this machine at 44GB across pnpm,
+ * npm, uv and pip.
+ *
+ * Each command below removes only what no existing project references, so the
+ * missions' contribution is precisely what a prune reclaims once their worktrees
+ * are gone. It is still a MACHINE-WIDE action, not a mission-scoped one — the
+ * caches are shared with ordinary development, and pruning them costs a slower
+ * next install everywhere. Hence opt-in, never part of the default sweep.
+ */
+export interface DeepCleanStep {
+	tool: string;
+	command: string;
+	ran: boolean;
+	freedBytes: number;
+	note?: string;
+}
+
+const DEEP_CLEAN: Array<{ tool: string; bin: string; args: string[] }> = [
+	{ tool: "pnpm", bin: "pnpm", args: ["store", "prune"] },
+	{ tool: "npm", bin: "npm", args: ["cache", "verify"] },
+	{ tool: "uv", bin: "uv", args: ["cache", "prune"] },
+];
+
+function freeBytes(): number {
+	try {
+		const out = execFileSync("df", ["-k", "/"], { encoding: "utf-8" }).toString().trim().split("\n").pop() ?? "";
+		return (Number.parseInt(out.split(/\s+/)[3] ?? "0", 10) || 0) * 1024;
+	} catch {
+		return 0;
+	}
+}
+
+export function deepClean(dryRun = false): DeepCleanStep[] {
+	return DEEP_CLEAN.map(({ tool, bin, args }) => {
+		const command = `${bin} ${args.join(" ")}`;
+		if (dryRun) return { tool, command, ran: false, freedBytes: 0, note: "would run" };
+		const before = freeBytes();
+		try {
+			execFileSync(bin, args, { stdio: ["ignore", "pipe", "pipe"], timeout: 10 * 60_000 });
+			return { tool, command, ran: true, freedBytes: Math.max(0, freeBytes() - before) };
+		} catch (err) {
+			const e = err as { code?: string; stderr?: Buffer };
+			const missing = e.code === "ENOENT";
+			return { tool, command, ran: false, freedBytes: 0, note: missing ? "not installed" : (e.stderr?.toString().split("\n")[0] ?? "failed").slice(0, 80) };
+		}
+	});
+}
+
 /** One-line summary per action, for the CLI. */
 export function renderSweep(result: SweepResult, dryRun: boolean): string[] {
 	const lines: string[] = [];

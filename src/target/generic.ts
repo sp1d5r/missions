@@ -4,7 +4,10 @@ import type { BehavioralResult, Target, WorktreeBootstrapSpec } from "./types.js
 
 /** Gitignored things almost every repo has and no worktree inherits. Missing entries are skipped. */
 const COMMON_ENV_FILES = [".env", ".env.local"];
-const COMMON_LINK_DIRS = ["node_modules", ".venv", "venv"];
+// Venvs bake absolute paths into their scripts, so they are shared read-only.
+const COMMON_LINK_DIRS = [".venv", "venv"];
+// node_modules is what a worker installs into — cloned so an install stays in this worktree.
+const COMMON_CLONE_DIRS = ["node_modules"];
 
 export function topLevelRecon(cwd: string): string {
 	const entries = readdirSync(cwd, { withFileTypes: true })
@@ -41,6 +44,7 @@ export const genericTarget: Target = {
 		return {
 			envFiles: COMMON_ENV_FILES.filter((f) => existsSync(join(cwd, f))),
 			linkDirs: COMMON_LINK_DIRS.filter((d) => existsSync(join(cwd, d))),
+			cloneDirs: COMMON_CLONE_DIRS.filter((d) => existsSync(join(cwd, d))),
 			sourceRoots: [],
 		};
 	},

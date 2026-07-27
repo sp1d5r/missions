@@ -23,7 +23,8 @@ const PYTHON_SRC_DIRS = ["shared/src", "naomi/src", "naomi-cli/src", "backend/sr
  */
 const ENV_FILES = [".env", "backend/.env", "naomi-web/.env.local", "website/.env.local", "website/.env"];
 
-/** Gitignored dirs too big to copy. Symlinked, therefore shared and read-only. */
+// Symlinked: shared and read-only. A venv stays here on purpose — its scripts bake in
+// absolute paths, so a copy at a new path is subtly broken in ways a clone cannot fix.
 const LINK_DIRS = [
 	"backend/.venv",
 	"shared/.venv",
@@ -31,14 +32,14 @@ const LINK_DIRS = [
 	"naomi-cli/.venv",
 	"queue_service/.venv",
 	"voice_service/.venv",
-	"node_modules",
-	"naomi-web/node_modules",
-	"website/node_modules",
-	"frontend/node_modules",
-	"naomi-remotion/node_modules",
 	// Gitignored sibling checkout that agent_runner and pi-extension-e2b-hands expect to find.
 	"pi-mono",
 ];
+
+// Cloned: a worker installs into these. Symlinking them meant `npm install` wrote through
+// into the main checkout, and `pnpm install` replaced the link with a real 1.8GB tree that
+// then had to be garbage collected. Copy-on-write costs the delta — measured at 48MB.
+const CLONE_DIRS = ["node_modules", "naomi-web/node_modules", "website/node_modules", "frontend/node_modules", "naomi-remotion/node_modules"];
 
 const ENV_DOCTRINE = `Nadine has exactly two environments, and this worktree is neither staging nor a sandbox:
 - LOCAL is Elijah's machine only. Nothing else runs here.
@@ -50,8 +51,11 @@ const ENV_DOCTRINE = `Nadine has exactly two environments, and this worktree is 
   generate images, video or voice to "check" something unless the feature is specifically about that.
 - SCHEMA changes are the one action that breaks every other tree at once. Do not run alembic upgrade,
   downgrade, or any DDL unless the harness has told you a branched database is in place.
-- Dependencies (.venv, node_modules) are SYMLINKS shared with the main checkout and are already
-  installed. Do not install, upgrade or remove packages — you would mutate every other worktree.`;
+- Python venvs (.venv) are SYMLINKS shared with the main checkout and are already installed. Do not
+  install, upgrade or remove python packages — you would mutate every other worktree.
+- node_modules are copy-on-write CLONES private to this worktree, already installed. You may install
+  a node package if the work genuinely needs one, and it will not affect anything else. Prefer not
+  to: a needless install is slow and shows up in the diff as a lockfile change.`;
 
 function listDir(cwd: string, rel: string, limit: number): string[] {
 	const p = join(cwd, rel);
@@ -85,7 +89,7 @@ export const nadineTarget: Target = {
 		return undefined;
 	},
 	bootstrapSpec(): WorktreeBootstrapSpec {
-		return { envFiles: ENV_FILES, linkDirs: LINK_DIRS, sourceRoots: PYTHON_SRC_DIRS };
+		return { envFiles: ENV_FILES, linkDirs: LINK_DIRS, cloneDirs: CLONE_DIRS, sourceRoots: PYTHON_SRC_DIRS };
 	},
 	envDoctrine: ENV_DOCTRINE,
 	async runBehavioral(cwd, scenario, threshold): Promise<BehavioralResult> {

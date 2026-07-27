@@ -13,7 +13,7 @@ import { missionDebrief, renderBriefing } from "./diagram-text.js";
 import { runDaemon, stopOrg } from "./daemon.js";
 import { runMission } from "./mission.js";
 import { forgetWorkspace, listWorkspaces, registerWorkspace } from "./workspaces.js";
-import { renderSweep, sweep } from "./lifecycle.js";
+import { deepClean, humanBytes, renderSweep, sweep } from "./lifecycle.js";
 import { autoRouting } from "./models.js";
 import { StateStore } from "./state.js";
 import { runBoardTui } from "./tui.js";
@@ -36,6 +36,8 @@ interface Flags {
 	targetKind?: "generic" | "nadine";
 	open: boolean;
 	help: boolean;
+	/** gc only: also prune shared package-manager caches (machine-wide). */
+	deep: boolean;
 	/** gc only: report what would be removed and touch nothing. */
 	dryRun: boolean;
 	socket?: string;
@@ -56,6 +58,7 @@ function parseArgs(argv: string[]): Flags {
 		maxVideos: 4,
 		open: false,
 		help: false,
+		deep: false,
 		dryRun: false,
 		args: [],
 	};
@@ -85,6 +88,7 @@ function parseArgs(argv: string[]): Flags {
 		else if (a === "--generic") f.targetKind = "generic";
 		else if (a === "--open") f.open = true;
 		else if (a === "--dry-run") f.dryRun = true;
+		else if (a === "--deep") f.deep = true;
 		else if (a.startsWith("-")) throw new Error(`Unknown flag: ${a}`);
 		else f.args.push(a);
 	}
@@ -99,7 +103,7 @@ Usage:
   missions repos                                 List every repo the org knows about
   missions forget <name>                         Drop a repo from the org (e.g. a throwaway sandbox)
   missions stop                                  Stop the org (running missions are abandoned)
-  missions gc [--target <repo>] [--dry-run]      Reclaim worktrees from finished missions; delete merged branches
+  missions gc [--target <repo>] [--dry-run] [--deep]  Reclaim worktrees from finished missions; delete merged branches
   missions peek [--target <repo>]                Read-only board TUI, no chief attached (quick glance)
   missions attach [--target <repo>]              Text-only chief chat, no board pane (dumb terminals)
   missions run --target <repo> --goal "..." [--rfc @file|text] [flags]   Non-interactive single mission
@@ -122,6 +126,7 @@ Flags:
   --branch <name>     Work branch (default: missions/<date>)
   --open              Open report.html when done
   --dry-run           gc: show what would be reclaimed, delete nothing
+  --deep              gc: ALSO prune shared pnpm/npm/uv caches (machine-wide, affects all your checkouts)
   -h, --help          This help
 
 Env: ANTHROPIC_API_KEY required. OPENAI_API_KEY enables cross-provider bug-spotter. GEMINI_API_KEY for Nadine judges.
@@ -264,6 +269,13 @@ async function main(): Promise<void> {
 		process.stdout.write(`${chalk.bold("gc")} ${chalk.dim(dry ? "(dry run — nothing will be deleted)" : "")}\n`);
 		const result = sweep({ repos, dryRun: dry });
 		process.stdout.write(`${renderSweep(result, dry).join("\n")}\n`);
+		if (f.args.includes("--deep") || f.deep) {
+			process.stdout.write(chalk.dim("\n  shared package caches (machine-wide — also used by your normal checkouts):\n"));
+			for (const s of deepClean(dry)) {
+				const detail = s.note ?? (s.freedBytes ? `freed ${humanBytes(s.freedBytes)}` : "nothing to prune");
+				process.stdout.write(`  ${s.ran ? "ran" : chalk.dim("skipped")} ${s.command} ${chalk.dim(`— ${detail}`)}\n`);
+			}
+		}
 		if (dry && (result.reclaimed.some((r) => !r.skipped) || result.droppedRecords)) {
 			process.stdout.write(chalk.dim("\n  run without --dry-run to apply\n"));
 		}

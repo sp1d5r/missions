@@ -27,6 +27,21 @@ export interface WorktreeBootstrapSpec {
 	 */
 	linkDirs: string[];
 	/**
+	 * Repo-relative gitignored directories to CLONE into the worktree, copy-on-write
+	 * where the filesystem supports it (APFS `cp -c`, btrfs/XFS `--reflink`).
+	 *
+	 * This is where anything a worker might INSTALL INTO belongs. A symlinked
+	 * `node_modules` has two failure modes that a clone does not: `npm install`
+	 * writes straight through it and mutates the main checkout's dependencies, and
+	 * `pnpm install` replaces the link with a real tree — turning a free symlink
+	 * into a full multi-gigabyte copy that then has to be garbage collected.
+	 *
+	 * A clone costs the delta only: measured on nadine, 1.8GB of node_modules
+	 * clones in ~32s for 48MB of actual disk. Falls back to a symlink, with a note,
+	 * on filesystems that cannot clone.
+	 */
+	cloneDirs?: string[];
+	/**
 	 * Repo-relative source roots that must resolve inside the worktree rather than from
 	 * installed packages. Become an absolute, worktree-rooted PYTHONPATH.
 	 */
