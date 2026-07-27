@@ -12,6 +12,7 @@
  */
 
 import chalk from "chalk";
+import type { Briefing, Verdict } from "./briefing.js";
 import { codename } from "./theme.js";
 import type { MilestoneRecord, MilestoneVerdict, MissionState } from "./types.js";
 
@@ -220,4 +221,73 @@ export function missionDebrief(state: MissionState, width = 92): string[] {
 	}
 
 	return ["", ...boxify(body, headline, chalk.dim(state.id), w), ""];
+}
+
+// ---------------------------------------------------------------------------
+// Video briefing.
+//
+// Ordered gaps-first, because a gap is the only verdict that asks anything of
+// you. The "already have" list is kept and shown rather than filtered away: it
+// is the evidence that the grounding step did its job, and a briefing that only
+// ever reported gaps would be one you stopped trusting.
+// ---------------------------------------------------------------------------
+
+const VERDICT_MARK: Record<Verdict, { mark: string; paint: Paint; label: string }> = {
+	gap: { mark: "▲", paint: chalk.yellow, label: "GAP" },
+	"already-have": { mark: "✓", paint: chalk.green, label: "have it" },
+	"not-applicable": { mark: "·", paint: chalk.dim, label: "n/a" },
+};
+
+export function renderBriefing(b: Briefing, width = 92): string[] {
+	const w = Math.max(60, Math.min(width, 120));
+	const inner = w - 4;
+
+	const gaps = b.items.filter((i) => i.verdict === "gap");
+	const have = b.items.filter((i) => i.verdict === "already-have");
+	const na = b.items.filter((i) => i.verdict === "not-applicable");
+
+	const headline = gaps.length
+		? chalk.yellow(`${gaps.length} GAP${gaps.length > 1 ? "S" : ""} · worth a mission`)
+		: chalk.green("NOTHING NEW · you are current");
+
+	const body: string[] = [];
+	body.push(chalk.dim(`${b.watched.length} watched · ${b.items.length} claim(s) grounded · $${b.costUsd.toFixed(3)}`));
+
+	if (gaps.length) {
+		body.push("");
+		body.push(rule(chalk.yellow("GAPS"), "", inner));
+		for (const g of gaps) {
+			body.push(`  ${chalk.yellow("▲")} ${fit(g.claim, inner - 4)}`);
+			if (g.goal) body.push(`      ${chalk.bold("→")} ${fit(g.goal, inner - 8)}`);
+			body.push(`      ${chalk.dim(fit(g.evidence, inner - 8))}`);
+			body.push(`      ${chalk.dim(`${g.video.channel} · ${g.video.url}`)}`);
+		}
+	}
+
+	if (have.length) {
+		body.push("");
+		body.push(rule("ALREADY HAVE", chalk.dim(`${have.length}`), inner));
+		for (const h of have) body.push(`  ${chalk.green("✓")} ${fit(h.claim, inner - 4)}  ${chalk.dim(fit(h.evidence, 34))}`);
+	}
+
+	if (na.length) {
+		body.push("");
+		body.push(rule(chalk.dim("NOT APPLICABLE"), chalk.dim(`${na.length}`), inner));
+		for (const n of na) body.push(`  ${chalk.dim("·")} ${chalk.dim(fit(n.claim, inner - 4))}`);
+	}
+
+	if (b.skipped.length) {
+		body.push("");
+		body.push(rule(chalk.dim("SKIPPED"), chalk.dim(`${b.skipped.length}`), inner));
+		for (const s of b.skipped.slice(0, 6)) {
+			body.push(`  ${chalk.dim("·")} ${chalk.dim(fit(`${s.video.title} — ${s.reason}`, inner - 4))}`);
+		}
+	}
+
+	if (!b.items.length) {
+		body.push("");
+		body.push(chalk.dim("  No grounded claims. Usually the right answer — most videos are explainers."));
+	}
+
+	return ["", ...boxify(body, headline, chalk.dim(b.queries.join(" · ").slice(0, 60)), w), ""];
 }

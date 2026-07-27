@@ -26,6 +26,10 @@ export class StateStore {
 			status: "planning",
 			branch: config.branch,
 			targetCwd: config.targetCwd,
+			// Recorded at creation so the changelog can attribute every commit to a seat
+			// and say why the mission was attempted. Neither is recoverable from the diff.
+			origin: config.origin ?? { kind: "human" },
+			routing: config.routing,
 			features: [],
 			handoffs: [],
 			milestones: [],

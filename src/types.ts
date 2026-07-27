@@ -179,6 +179,19 @@ export type MissionStatus = "planning" | "working" | "validating" | "reporting" 
 /** Did the mission end clean, or does it want a human? Independent of run success/crash. */
 export type MissionOutcome = "clean" | "needs-review";
 
+/**
+ * Where a mission came from. Recorded so the changelog can say not just what an
+ * agent changed but why it was attempted — the one fact you cannot recover from
+ * the diff when the change turns out to be wrong.
+ */
+export interface MissionOrigin {
+	kind: "human" | "chief" | "suggestion" | "briefing";
+	/** Free text: the suggestion's rationale, or the claim a briefing grounded. */
+	note?: string;
+	/** For briefings: the video the claim came from. */
+	sourceUrl?: string;
+}
+
 export interface MissionConfig {
 	goal: string;
 	/** The user's "here's what's wrong" RFC / feedback. Free text. */
@@ -201,6 +214,8 @@ export interface MissionConfig {
 	target: "generic" | "nadine";
 	/** Run in an isolated git worktree (enables true parallel missions). Default true. */
 	useWorktree?: boolean;
+	/** Provenance, carried into MissionState and the changelog. Defaults to "human". */
+	origin?: MissionOrigin;
 }
 
 export interface MissionState {
@@ -211,6 +226,10 @@ export interface MissionState {
 	status: MissionStatus;
 	branch: string;
 	targetCwd: string;
+	/** Who or what prompted this mission. */
+	origin?: MissionOrigin;
+	/** Model per seat, kept so the changelog can attribute each commit. */
+	routing?: ModelRouting;
 	/** HEAD of the target repo when the work branch was created (diff base). */
 	baseSha?: string;
 	/** Isolated worktree dir the worker operated in (present when useWorktree). */

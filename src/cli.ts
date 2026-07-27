@@ -7,13 +7,16 @@ import chalk from "chalk";
 import { runClient } from "./client.js";
 import { cmuxOpenBrowser, cmuxOpenDiff, hasCmuxPassword, insideCmux } from "./cmux.js";
 import { runControl } from "./control.js";
-import { missionDebrief } from "./diagram-text.js";
+import { generateBriefing } from "./briefing.js";
+import { generateChangelog } from "./changelog.js";
+import { missionDebrief, renderBriefing } from "./diagram-text.js";
 import { runDaemon } from "./daemon.js";
 import { runMission } from "./mission.js";
 import { autoRouting } from "./models.js";
 import { StateStore } from "./state.js";
 import { runBoardTui } from "./tui.js";
 import type { MissionConfig } from "./types.js";
+import { ytDlpPath } from "./youtube.js";
 
 interface Flags {
 	cmd: string;
@@ -23,6 +26,8 @@ interface Flags {
 	budget: number;
 	maxFeatures: number;
 	maxMilestones: number;
+	queries: string[];
+	maxVideos: number;
 	out?: string;
 	branch?: string;
 	check?: string;
@@ -41,6 +46,8 @@ function parseArgs(argv: string[]): Flags {
 		budget: 8,
 		maxFeatures: 1,
 		maxMilestones: 3,
+		queries: [],
+		maxVideos: 4,
 		open: false,
 		help: false,
 	};
@@ -60,6 +67,8 @@ function parseArgs(argv: string[]): Flags {
 		else if (a === "--budget") f.budget = Number.parseFloat(next());
 		else if (a === "--max-features") f.maxFeatures = Number.parseInt(next(), 10);
 		else if (a === "--max-milestones") f.maxMilestones = Number.parseInt(next(), 10);
+		else if (a === "--query") f.queries.push(next());
+		else if (a === "--max-videos") f.maxVideos = Number.parseInt(next(), 10);
 		else if (a === "--out") f.out = resolve(next());
 		else if (a === "--branch") f.branch = next();
 		else if (a === "--check") f.check = next();
@@ -81,6 +90,8 @@ Usage:
   missions attach [--target <repo>]              Text-only chief chat, no board pane (dumb terminals)
   missions run --target <repo> --goal "..." [--rfc @file|text] [flags]   Non-interactive single mission
   missions status --out <mission-out-dir>
+  missions changelog [--target <repo>]            Regenerate CHANGELOG.md from every mission's state.json
+  missions brief [--target <repo>] [--query "..."] [--max-videos <n>]   Watch recent talks, ground every claim against this repo
 
 Flags:
   --target <path>     Target repo to work on (default: cwd)
@@ -89,6 +100,8 @@ Flags:
   --budget <usd>      Total USD budget (default: 8)
   --max-features <n>  Features executed per milestone (default: 1)
   --max-milestones <n> Corrective rounds before stopping for a human (default: 3)
+  --query "<text>"    Briefing search query (repeatable; defaults to harness-design queries)
+  --max-videos <n>    Transcripts to read per briefing (default: 4)
   --check "<cmd>"     Extra scrutiny command (e.g. "npm test")
   --nadine|--generic  Force target adapter (default: auto-detect)
   --out <path>        Where to write state.json/report.html (default: <target>/.missions/runs/<id>)
@@ -182,6 +195,31 @@ async function main(): Promise<void> {
 	if (f.cmd === "__daemon") {
 		if (!f.socket) throw new Error("__daemon requires --socket");
 		await runDaemon(f.target, f.socket);
+		return;
+	}
+
+	if (f.cmd === "changelog") {
+		const { path, entries } = generateChangelog(f.target, basename(f.target));
+		process.stdout.write(`${chalk.bold("changelog")} → ${path} ${chalk.dim(`(${entries} mission(s))`)}\n`);
+		return;
+	}
+
+	if (f.cmd === "brief") {
+		if (!getEnvApiKey("anthropic")) {
+			process.stderr.write(`${chalk.red("Missing ANTHROPIC_API_KEY")}\n`);
+			process.exit(1);
+		}
+		if (!ytDlpPath()) {
+			process.stderr.write(`${chalk.red("yt-dlp not found")} — install it with ${chalk.bold("brew install yt-dlp")}\n`);
+			process.exit(1);
+		}
+		const b = await generateBriefing({
+			repo: f.target,
+			queries: f.queries,
+			maxVideos: f.maxVideos,
+			onProgress: (m) => process.stdout.write(`  ${chalk.dim(m)}\n`),
+		});
+		process.stdout.write(`${renderBriefing(b).join("\n")}\n`);
 		return;
 	}
 
