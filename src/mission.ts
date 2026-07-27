@@ -508,6 +508,8 @@ function applyRulings(handoffs: Handoff[], rulings: CorrectionRuling[]): void {
 				issue.disposition = hit.disposition;
 				issue.dispositionNote = hit.note;
 				issue.addressedBy = hit.disposition === "addressed" ? hit.correctionId : undefined;
+				issue.deferredEvidence = hit.disposition === "deferred" ? hit.evidenceAssertionId : undefined;
+				issue.deferredOutOfScope = hit.disposition === "deferred" ? hit.outOfScope === true : undefined;
 			}
 		}
 	}

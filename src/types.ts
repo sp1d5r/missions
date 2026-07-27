@@ -157,6 +157,18 @@ export interface HandoffIssue {
 	/** Id of the correction that picks it up. Required for "addressed" — an issue nothing
 	 *  is dispatched to fix has not been addressed, it has been dropped. */
 	addressedBy?: string;
+	/**
+	 * For "deferred": the id of a PASSING assertion that already covers this concern.
+	 *
+	 * Deferring used to accept free prose, and prose is not checkable. A real run closed an
+	 * issue reading "end-to-end mission run not verified" with the note "validators
+	 * independently confirmed the code behavior" — while every assertion was a `test -f` or a
+	 * grep, and nothing had executed the feature. The mission then reported CLEAN. Naming an
+	 * assertion makes the claim falsifiable.
+	 */
+	deferredEvidence?: string;
+	/** For "deferred": the concern is outside what the RFC asked for. The alternative to citing evidence. */
+	deferredOutOfScope?: boolean;
 }
 
 /** Structured worker handoff. Free prose alone is not accepted. */

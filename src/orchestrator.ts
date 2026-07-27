@@ -146,7 +146,12 @@ Your job:
    say so plainly — that gap is the most important signal you have.
 2. RULE ON EVERY OPEN ISSUE. Each issue a worker raised must get exactly one disposition:
    - "addressed": a correction IN THIS RESPONSE fixes it. You MUST name that correction in "correctionId".
-   - "deferred": nothing this mission will fix it — already handled, out of scope, or safe to leave. Say why in "note".
+   - "deferred": nothing this mission will fix it. You MUST justify it in a checkable way, with ONE of:
+       "evidenceAssertionId": the id of an assertion that PASSED and already covers this concern, or
+       "outOfScope": true, when the RFC did not ask for it.
+     A note alone is not a justification. Prose is not checkable, and the harness rejects a deferral
+     that cites neither. Do NOT claim validators confirmed something unless a passing assertion
+     actually executed the code — the harness checks that too, and blocks the milestone if it did not.
    You may not leave an issue unruled, and you may not rule one "addressed" without naming the correction that
    picks it up. The harness blocks the mission on both, because an issue nobody is dispatched to fix has not
    been addressed, it has been dropped.
@@ -170,6 +175,8 @@ Output ONLY a JSON object, no prose:
   "verdict": "passed" | "needs-corrections" | "stalled",
   "issueRulings": [
     { "summary": "must match the issue summary verbatim", "disposition": "addressed", "correctionId": "c1", "note": "why" },
+    { "summary": "...", "disposition": "deferred", "evidenceAssertionId": "a3", "note": "a3 exercises this path end to end" },
+    { "summary": "...", "disposition": "deferred", "outOfScope": true, "note": "the RFC explicitly excludes this" },
     { "summary": "must match the issue summary verbatim", "disposition": "deferred", "note": "why it is safe to leave" }
   ],
   "corrections": [
@@ -184,6 +191,10 @@ export interface CorrectionRuling {
 	disposition: IssueDisposition;
 	/** For "addressed": which correction picks it up. Checked by the boundary invariants. */
 	correctionId?: string;
+	/** For "deferred": id of a PASSING assertion that already covers it. Checked by the invariants. */
+	evidenceAssertionId?: string;
+	/** For "deferred": the concern is outside what the RFC asked for. */
+	outOfScope?: boolean;
 	note?: string;
 }
 

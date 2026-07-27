@@ -190,6 +190,52 @@ export function checkBoundary(facts: BoundaryFacts): Violation[] {
 		}
 	}
 
+	// "deferred" is where a milestone quietly closes something it never proved. A real run
+	// deferred "end-to-end mission run not verified" on the grounds that "validators
+	// independently confirmed the code behavior" — while every assertion was a `test -f` or a
+	// grep and nothing had executed the feature. That mission reported CLEAN. So a deferral must
+	// point at something checkable, and a claim about validation has to actually be true.
+	const passedIds = new Set(assertions.filter((a) => a.passed).map((a) => a.id));
+	const behaviouralPassed = (scoreCard.strengthBreakdown?.behavioural?.passed ?? 0) > 0;
+	const CLAIMS_VALIDATION = /\b(validators?|validated|verified|confirm(ed|s)?)\b/i;
+	const deferred = issues.filter((x) => x.disposition === "deferred");
+
+	for (const i of deferred) {
+		if (i.deferredOutOfScope) continue;
+		if (!i.deferredEvidence) {
+			push(
+				"ruling.deferred-cites-evidence",
+				"block",
+				`deferred with prose but no evidence — cite a passing assertion or mark it out of scope: ${snip(i.summary)}`,
+			);
+			continue;
+		}
+		if (!assertions.some((a) => a.id === i.deferredEvidence)) {
+			push(
+				"ruling.deferred-evidence-exists",
+				"block",
+				`deferred citing "${i.deferredEvidence}", which is not an assertion in this contract: ${snip(i.summary)}`,
+			);
+		} else if (!passedIds.has(i.deferredEvidence)) {
+			push(
+				"ruling.deferred-evidence-passed",
+				"block",
+				`deferred citing "${i.deferredEvidence}", which did not pass: ${snip(i.summary)}`,
+			);
+		}
+	}
+
+	// The specific lie that got past us: claiming validation happened when nothing executed.
+	for (const i of deferred) {
+		if (CLAIMS_VALIDATION.test(i.dispositionNote ?? "") && !behaviouralPassed) {
+			push(
+				"ruling.validation-claim-is-true",
+				"block",
+				`deferral claims validation confirmed it, but no behavioural assertion passed — nothing executed the feature: ${snip(i.summary)}`,
+			);
+		}
+	}
+
 	const contractIds = new Set(assertions.map((a) => a.id));
 	const failingIds = new Set(failing.map((a) => a.id));
 	const alreadyDispatched = new Set(dispatchedFeatureIds);
