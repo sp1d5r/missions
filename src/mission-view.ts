@@ -94,33 +94,35 @@ function wrapLines(text: string, w: number): string[] {
 
 /** Resolve a partial runId prefix to a full outDir path. Returns null if ambiguous/missing. */
 export function resolveRunId(prefix: string): { outDir: string; id: string } | null {
-	// First, try exact match in active records
 	const active = readActive();
-	const exactActive = active.filter((r) => r.id === prefix);
-	if (exactActive.length === 1 && exactActive[0]) {
-		const rec = exactActive[0];
-		// Derive outDir from the id pattern: <targetCwd>/.missions/runs/<id>
-		// but active records don't store outDir, so we try common locations
-		const guesses = [
-			join(rec.repo, ".missions", "runs", rec.id),
-		];
-		for (const g of guesses) {
-			if (existsSync(join(g, "state.json"))) {
-				return { outDir: g, id: rec.id };
-			}
+
+	// Helper: given an active record, resolve its outDir.
+	// Prefers the stored outDir field if present; otherwise falls back to the conventional path.
+	function resolveRecordOutDir(rec: { id: string; repo: string; outDir?: string }): string | null {
+		// If the record has an outDir stored, trust it first.
+		if (rec.outDir && existsSync(join(rec.outDir, "state.json"))) {
+			return rec.outDir;
 		}
+		// Fall back to the conventional path: <repo>/.missions/runs/<id>
+		const conventional = join(rec.repo, ".missions", "runs", rec.id);
+		if (existsSync(join(conventional, "state.json"))) {
+			return conventional;
+		}
+		return null;
 	}
 
-	// Try prefix match in active records
+	// Exact match first
+	const exactActive = active.filter((r) => r.id === prefix);
+	if (exactActive.length === 1 && exactActive[0]) {
+		const outDir = resolveRecordOutDir(exactActive[0]);
+		if (outDir) return { outDir, id: exactActive[0].id };
+	}
+
+	// Prefix match
 	const prefixActive = active.filter((r) => r.id.startsWith(prefix));
 	if (prefixActive.length === 1 && prefixActive[0]) {
-		const rec = prefixActive[0];
-		const guesses = [join(rec.repo, ".missions", "runs", rec.id)];
-		for (const g of guesses) {
-			if (existsSync(join(g, "state.json"))) {
-				return { outDir: g, id: rec.id };
-			}
-		}
+		const outDir = resolveRecordOutDir(prefixActive[0]);
+		if (outDir) return { outDir, id: prefixActive[0].id };
 	}
 
 	return null;

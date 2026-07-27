@@ -27,6 +27,8 @@ export interface ActiveRecord {
 	outcome?: string;
 	/** Set once the human has actioned it (merged/retried/dismissed) — drops it from the "needs you" queue. */
 	cleared?: boolean;
+	/** Full path to the run output directory (state.json lives here). */
+	outDir?: string;
 }
 
 export function writeActive(rec: ActiveRecord): void {
