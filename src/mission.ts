@@ -10,6 +10,7 @@ import { generateReport } from "./report.js";
 import { StateStore } from "./state.js";
 import { getTarget } from "./target/index.js";
 import type { Feature, Handoff, MilestoneRecord, MilestoneVerdict, MissionConfig, MissionState, ScoreCard } from "./types.js";
+import { loadAgentSpecs } from "./subagent.js";
 import { runValidators } from "./validators/index.js";
 import { runWorker } from "./worker.js";
 
@@ -168,6 +169,10 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 		store.state.features = [...queue];
 		store.save();
 
+		// Read-only scouts, loaded once from the TARGET repo rather than the worktree, so a
+		// mission cannot rewrite the specs of the agents helping it partway through its own run.
+		const scouts = loadAgentSpecs(config.targetCwd);
+
 		let scoreCard: ScoreCard | undefined;
 		let verdict: MilestoneVerdict = "stalled";
 
@@ -198,6 +203,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 					model: config.routing.worker,
 					budgetUsd: Math.min(remaining, config.budgetUsd * 0.6),
 					env: missionEnv,
+					scouts,
 					envDoctrine: [target.envDoctrine, schemaWarning && `HARNESS WARNING: ${schemaWarning}`]
 						.filter(Boolean)
 						.join("\n"),

@@ -27,6 +27,9 @@ import { completeSimple, getEnvApiKey, getModel as getModelRaw, stream } from "@
 export type { AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 export type { AssistantMessage, KnownProvider } from "@earendil-works/pi-ai";
 export { Agent, completeSimple, getEnvApiKey };
+// Re-exported so tool schemas import typebox through the same seam as everything else
+// (upstream moved @sinclair/typebox -> typebox between 0.68 and 0.82).
+export { Type } from "typebox";
 
 /**
  * The provider-backed stream function, as pi-agent-core wants it.

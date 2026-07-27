@@ -1,4 +1,5 @@
 import { createCodingTools } from "@earendil-works/pi-coding-agent";
+import { type AgentSpec, createDelegateTool } from "./subagent.js";
 import { Agent, getEnvApiKey, getModel, streamFn, type AgentEvent, type AgentMessage, type AssistantMessage } from "./pi.js";
 import { parseJson } from "./llm.js";
 import type { Assertion, CommandRecord, Feature, Handoff, HandoffIssue, ModelSpec } from "./types.js";
@@ -72,15 +73,21 @@ export interface RunWorkerOptions {
 	env?: NodeJS.ProcessEnv;
 	/** Ground truth about the repo's environments, handed to the worker verbatim. */
 	envDoctrine?: string;
+	/**
+	 * Read-only scouts this worker may delegate investigation to. Omit to disable
+	 * fan-out entirely — a worker with no scouts behaves exactly as it did before.
+	 */
+	scouts?: AgentSpec[];
 	onProgress?: (e: { type: "tool"; toolName: string } | { type: "cost"; costUsd: number }) => void;
 }
 
 export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult> {
-	const { feature, assertions, milestone, cwd, model: spec, budgetUsd, env, envDoctrine, onProgress } = options;
+	const { feature, assertions, milestone, cwd, model: spec, budgetUsd, env, envDoctrine, scouts, onProgress } = options;
 
 	const model = getModel(spec.provider, spec.modelId);
 	if (!model) throw new Error(`Worker model not found: ${spec.provider}/${spec.modelId}`);
 
+	let costUsd = 0;
 	const agent = new Agent({
 		initialState: {
 			systemPrompt: SYSTEM_PROMPT,
@@ -88,13 +95,30 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult
 			thinkingLevel: "off",
 			// The spawn hook is the seam that makes the environment explicit rather than ambient:
 			// every bash command the worker runs gets the mission's env, not the daemon's.
-			tools: createCodingTools(cwd, env ? { bash: { spawnHook: (ctx) => ({ ...ctx, env }) } } : undefined),
+			tools: [
+				...createCodingTools(cwd, env ? { bash: { spawnHook: (ctx) => ({ ...ctx, env }) } } : undefined),
+				// Read-only fan-out. Scout spend is charged straight to this worker's total,
+				// so delegating is a budget decision the same as any other tool call.
+				...(scouts?.length
+					? [
+							createDelegateTool({
+								cwd,
+								specs: scouts,
+								model: spec,
+								onCost: (usd) => {
+									costUsd += usd;
+									onProgress?.({ type: "cost", costUsd: usd });
+								},
+								onProgress: (msg) => onProgress?.({ type: "tool", toolName: msg }),
+							}),
+						]
+					: []),
+			],
 		},
 		streamFn,
 		getApiKey: (provider) => getEnvApiKey(provider),
 	});
 
-	let costUsd = 0;
 	let aborted = false;
 	let stopReason = "stop";
 	let errorMessage: string | undefined;
