@@ -85,20 +85,24 @@ const FILESYSTEM_ONLY_COMMANDS = new Set([
  * execute something, we return false.
  */
 function commandTokens(command: string): string[] {
+	// Collapse backslash-newline line continuations before any other processing
+	const continued = command.replace(/\\\n/g, " ");
 	// Strip quoted strings (they're arguments, not commands)
-	const stripped = command.replace(/'[^']*'|"[^"]*"/g, "''");
+	const stripped = continued.replace(/'[^']*'|"[^"]*"/g, "''");
 	// Split on shell control operators
 	const segments = stripped.split(/[;&|(){}\n]+/);
 	return segments
 		.map((seg) => seg.trim())
 		.filter((seg) => seg.length > 0)
 		.map((seg) => {
-			// Handle `env VAR=val cmd` and `! cmd` negation
+			// Handle `env VAR=val cmd`, bare `env`, and `! cmd` negation
 			const tokens = seg.split(/\s+/);
 			let idx = 0;
 			while (idx < tokens.length) {
 				const t = tokens[idx];
 				if (!t || t === "!") { idx++; continue; }
+				// Skip a leading `env` token, then consume any following VAR=value assignments
+				if (t === "env") { idx++; continue; }
 				// Skip `VAR=value` assignments
 				if (/^[A-Z_][A-Z0-9_]*=/.test(t)) { idx++; continue; }
 				return t;
