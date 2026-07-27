@@ -12,10 +12,11 @@ import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { basename } from "node:path";
 import chalk from "chalk";
-import { Agent, getEnvApiKey, getModel, streamFn, type AgentEvent, type AgentMessage } from "./pi.js";
+import { Agent, getEnvApiKey, getModel, streamFn, Type, type AgentEvent, type AgentMessage, type AgentTool } from "./pi.js";
 import { autoRouting } from "./models.js";
 import { StateStore } from "./state.js";
 import type { MissionState } from "./types.js";
+import { workerClient } from "./workers.js";
 
 // ---------------------------------------------------------------------------
 // Chat history persistence
@@ -102,6 +103,78 @@ export interface OverseerSession {
 	close(): void;
 }
 
+/**
+ * Tools that let the overseer reach the mission's LIVE workers.
+ *
+ * Without these the overseer is a commentator: it reads state and log and talks about them. With
+ * them it can question a worker that is mid-task and redirect one that is going wrong — which is
+ * the difference between watching a factory and running one. Everything goes over the mission
+ * process's socket, because the view is a separate process from the runner.
+ */
+function workerTools(missionId: string): AgentTool[] {
+	const client = workerClient(missionId);
+	const text = (v: unknown) => ({ content: [{ type: "text", text: typeof v === "string" ? v : JSON.stringify(v, null, 1) }] });
+
+	const listTool = {
+		name: "list_workers",
+		label: "workers",
+		description:
+			"List the workers running RIGHT NOW in this mission: id, what they were given, how long they have been going, spend, and their last action. " +
+			"Empty means nothing is in flight — the mission is planning, validating, or finished.",
+		parameters: Type.Object({}),
+		async execute() {
+			const live = await client.list();
+			if (Array.isArray(live) && live.length === 0) return text("No workers are running right now.");
+			return text(live);
+		},
+	} as unknown as AgentTool;
+
+	const tailTool = {
+		name: "worker_tail",
+		label: "tail",
+		description: "The last few things a running worker said. Use it to see what one is actually doing before judging it.",
+		parameters: Type.Object({ id: Type.String({ description: "Worker id from list_workers." }) }),
+		async execute(_id: string, p: { id: string }) {
+			return text(await client.tail(p.id));
+		},
+	} as unknown as AgentTool;
+
+	const askTool = {
+		name: "ask_worker",
+		label: "ask",
+		description:
+			"Ask a RUNNING worker a question and wait for its answer. It replies at its next turn boundary and then carries on — this does not interrupt or redirect it. " +
+			"Use it to find out why it is doing something before deciding whether to steer it. May take a minute if it is mid tool call.",
+		parameters: Type.Object({
+			id: Type.String({ description: "Worker id from list_workers." }),
+			question: Type.String({ description: "One specific question." }),
+		}),
+		async execute(_id: string, p: { id: string; question: string }) {
+			const r = await client.ask(p.id, p.question);
+			return text(r.detail);
+		},
+	} as unknown as AgentTool;
+
+	const steerTool = {
+		name: "steer_worker",
+		label: "steer",
+		description:
+			"Redirect a RUNNING worker. The instruction is injected at its next turn boundary and explicitly supersedes its current approach; it is not aborted, so it keeps everything it has worked out so far. " +
+			"Use this when a worker is going the wrong way — the alternative is letting it finish, letting validators fail, and paying for a correction round. " +
+			"Steers are recorded in the worker's handoff, so be specific enough that the record makes sense later.",
+		parameters: Type.Object({
+			id: Type.String({ description: "Worker id from list_workers." }),
+			instruction: Type.String({ description: "What to do differently, and briefly why." }),
+		}),
+		async execute(_id: string, p: { id: string; instruction: string }) {
+			const r = await client.steer(p.id, p.instruction);
+			return text(r.detail);
+		},
+	} as unknown as AgentTool;
+
+	return [listTool, tailTool, askTool, steerTool];
+}
+
 /** Create a per-mission overseer agent, reusing chief agent machinery. */
 export function createOverseerSession(outDir: string): OverseerSession | null {
 	const store = StateStore.load(outDir);
@@ -125,7 +198,7 @@ export function createOverseerSession(outDir: string): OverseerSession | null {
 			systemPrompt,
 			model,
 			thinkingLevel: "off",
-			tools: [],
+			tools: workerTools(state.id),
 		},
 		streamFn,
 		getApiKey: (provider) => getEnvApiKey(provider),

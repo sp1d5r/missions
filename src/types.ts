@@ -193,6 +193,8 @@ export interface Handoff {
 	/** Assertion ids the worker CLAIMS to have satisfied. Validators decide independently. */
 	assertionsClaimed: string[];
 	confidence: "high" | "medium" | "low";
+	/** Operator steers injected mid-run. Recorded so "what did this worker decide" stays answerable. */
+	steers?: string[];
 	/** True when the worker failed to emit a parseable handoff and we fell back to its prose. */
 	degraded?: boolean;
 	/** Harness-side facts about the run. */

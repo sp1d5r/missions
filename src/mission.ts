@@ -16,6 +16,7 @@ import { loadAgentSpecs } from "./subagent.js";
 import { annotateVerdict } from "./validators/checks.js";
 import { runValidators } from "./validators/index.js";
 import { runWorker } from "./worker.js";
+import { serveWorkers } from "./workers.js";
 
 export type MissionEvent =
 	| { type: "status"; status: MissionState["status"] }
@@ -29,6 +30,10 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 	const intent = `GOAL: ${config.goal}\n\nRFC: ${config.rfc}`;
 	const maxMilestones = Math.max(1, config.maxMilestones ?? 3);
 	/** Set when a branched database was provisioned for this mission's schema work. */
+	// Serve this mission's live workers so another process — the overseer, the CLI — can list,
+	// question and steer them while they run. An affordance, never a requirement: if the socket
+	// cannot be opened the mission is unaffected, you just cannot talk to it.
+	const stopServing = serveWorkers(store.state.id);
 	let dbTeardown: (() => Promise<void>) | undefined;
 	/** Set when the plan involves schema work we could NOT isolate. Workers must be told. */
 	let schemaWarning: string | undefined;
@@ -498,6 +503,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 			/* ignore secondary failure */
 		}
 	} finally {
+		stopServing();
 		if (dbTeardown) {
 			await dbTeardown();
 			emit("database: mission branch removed");

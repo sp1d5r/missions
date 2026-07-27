@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { type AgentSpec, createDelegateTool } from "./subagent.js";
 import { Agent, getEnvApiKey, getModel, streamFn, type AgentEvent, type AgentMessage, type AssistantMessage } from "./pi.js";
 import { parseJson } from "./llm.js";
+import { registerWorker } from "./workers.js";
 import type { Assertion, CommandRecord, Feature, Handoff, HandoffIssue, ModelSpec } from "./types.js";
 
 const SYSTEM_PROMPT = `You are a CODING WORKER in an autonomous engineering org.
@@ -75,6 +76,8 @@ export interface RunWorkerOptions {
 	env?: NodeJS.ProcessEnv;
 	/** Ground truth about the repo's environments, handed to the worker verbatim. */
 	envDoctrine?: string;
+	/** Mission this worker belongs to. Forms its addressable id, so it can be steered mid-run. */
+	missionId?: string;
 	/**
 	 * Read-only scouts this worker may delegate investigation to. Omit to disable
 	 * fan-out entirely — a worker with no scouts behaves exactly as it did before.
@@ -90,6 +93,12 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult
 	if (!model) throw new Error(`Worker model not found: ${spec.provider}/${spec.modelId}`);
 
 	let costUsd = 0;
+	// Registered before the first turn so it is reachable for its whole life, not just once it
+	// has produced output. Recent assistant text is kept for `tail` so an overseer can see what
+	// it is doing without replaying the transcript.
+	const recent: string[] = [];
+	const liveInfo = { id: "", missionId: "", featureId: "", title: "", startedAt: Date.now(), costUsd: 0, lastActivity: "starting", steers: [] as string[] };
+	const workerId = `${options.missionId ?? "mission"}:${feature.id}`;
 	const agent = new Agent({
 		initialState: {
 			systemPrompt: SYSTEM_PROMPT,
@@ -138,12 +147,20 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult
 			}
 			if (msg.stopReason) stopReason = msg.stopReason;
 			if (msg.errorMessage) errorMessage = msg.errorMessage;
+			// Keep the live view current: an overseer tailing this worker sees what it just said.
+			const said = msg.content.filter((c) => c.type === "text").map((c) => c.text).join("\n").trim();
+			if (said) {
+				recent.push(said.slice(0, 1200));
+				if (recent.length > 10) recent.shift();
+			}
 			if (costUsd >= budgetUsd && !aborted) {
 				aborted = true;
 				agent.abort();
 			}
 		} else if (event.type === "tool_execution_start") {
 			onProgress?.({ type: "tool", toolName: event.toolName });
+			liveInfo.lastActivity = event.toolName;
+			liveInfo.costUsd = costUsd;
 			if (event.toolName === "bash") {
 				const cmd = (event.args as { command?: string } | undefined)?.command;
 				if (cmd) inFlight.set(event.toolCallId, cmd);
@@ -185,12 +202,26 @@ ${assertionText}
 
 Make the change now, then emit your handoff block.`;
 
+	const info = liveInfo;
+	Object.assign(liveInfo, {
+		id: workerId,
+		missionId: options.missionId ?? "mission",
+		featureId: feature.id,
+		title: feature.title,
+		startedAt: Date.now(),
+		costUsd: 0,
+		lastActivity: "starting",
+		steers: liveInfo.steers,
+	});
+	const unregister = registerWorker({ info, agent, recent });
+
 	try {
 		await agent.prompt(task);
 	} catch (err) {
 		errorMessage = err instanceof Error ? err.message : String(err);
 	}
 	await agent.waitForIdle();
+	unregister();
 
 	// Any command still in flight when we aborted: record it with an unknown exit code
 	// rather than dropping it. A killed command is exactly the kind of thing the next
@@ -213,6 +244,7 @@ Make the change now, then emit your handoff block.`;
 			procedureNotes: typeof handoff?.procedureNotes === "string" ? handoff.procedureNotes : undefined,
 			assertionsClaimed: stringList(handoff?.assertionsClaimed).filter((id) => assertions.some((a) => a.id === id)),
 			confidence: confidenceOf(handoff?.confidence),
+			steers: liveInfo.steers.length ? [...liveInfo.steers] : undefined,
 			degraded: handoff === null,
 			stopReason,
 			aborted,
