@@ -47,30 +47,52 @@ function padVis(s: string, w: number): string {
 	return s + " ".repeat(w - v) + (s.includes(ESC) ? RESET : "");
 }
 
-/** Char-wrap a single line to a visible width, passing ANSI codes through untouched. */
-function wrapAnsi(line: string, width: number): string[] {
-	const w = width < 4 ? 4 : width;
-	const out: string[] = [];
-	let cur = "";
+/** Split off the first `w` visible columns, carrying ANSI codes through. */
+function splitVis(s: string, w: number): [string, string] {
+	let head = "";
 	let vis = 0;
 	let i = 0;
-	while (i < line.length) {
-		if (line[i] === ESC) {
-			const m = line.slice(i).match(/^\x1b\[[0-9;]*m/);
+	while (i < s.length && vis < w) {
+		if (s[i] === ESC) {
+			const m = s.slice(i).match(/^\x1b\[[0-9;]*m/);
 			if (m) {
-				cur += m[0];
+				head += m[0];
 				i += m[0].length;
 				continue;
 			}
 		}
-		cur += line[i];
+		head += s[i];
 		vis++;
 		i++;
-		if (vis >= w) {
-			out.push(cur);
-			cur = "";
-			vis = 0;
+	}
+	return [head, s.slice(i)];
+}
+
+/**
+ * Word-wrap a line to a visible width, passing ANSI codes through untouched.
+ * Breaking mid-word ("should do i / t.") makes the chief's replies read as
+ * garbled, which is the pane you spend the most time actually reading.
+ */
+function wrapAnsi(line: string, width: number): string[] {
+	const w = width < 4 ? 4 : width;
+	if (visLen(line) <= w) return [line];
+	const out: string[] = [];
+	let cur = "";
+	for (const word of line.split(" ")) {
+		const candidate = cur ? `${cur} ${word}` : word;
+		if (visLen(candidate) <= w) {
+			cur = candidate;
+			continue;
 		}
+		if (cur) out.push(cur);
+		// A single word wider than the pane still has to break somewhere.
+		let rest = word;
+		while (visLen(rest) > w) {
+			const [head, tail] = splitVis(rest, w);
+			out.push(head);
+			rest = tail;
+		}
+		cur = rest;
 	}
 	if (cur || out.length === 0) out.push(cur);
 	return out;
@@ -140,6 +162,86 @@ function chatPane(transcript: string, w: number, height: number): string[] {
 	const tail = wrapped.slice(-height);
 	while (tail.length < height) tail.unshift("");
 	return tail;
+}
+
+export interface ControlFrameState {
+	width: number;
+	height: number;
+	transcript: string;
+	items: Item[];
+	selected: number;
+	mode: "chat" | "board";
+	buffer: string;
+	toast: string;
+	/** Non-empty while the chief is working — replaces the status line. */
+	busy: string;
+	spin: number;
+	targetCwd: string;
+	now: number;
+}
+
+/**
+ * Compose the framed console. Pure — testable without a TTY or a daemon.
+ *
+ * The frame is not decoration. Two panes divided by whitespace read as text
+ * spilling down the screen; the same two panes inside a fixed border read as
+ * regions you are working inside, and the boundary itself carries which one has
+ * focus and where typing lands. Titles live in the top edge and the status line
+ * in the bottom edge, so the whole frame costs two rows — one fewer than the
+ * header/status/input stack it replaces.
+ *
+ * Column map for a body row:  │ ‹Lw› │ ‹Rw› │   →   width = Lw + Rw + 7
+ */
+export function composeControlFrame(s: ControlFrameState): { rows: string[]; cursorRow: number; cursorCol: number } {
+	const inner = Math.max(46, s.width - 7);
+	const Lw = Math.max(24, Math.floor(inner * 0.56));
+	const Rw = Math.max(18, inner - Lw);
+	const bodyH = Math.max(4, s.height - 2); // top edge + bottom edge
+	const chatH = bodyH - 1; // last body row is the composer
+
+	const left = chatPane(s.transcript, Lw, chatH);
+	const right = boardPane(s.items, s.selected, s.mode === "board", Rw, s.now);
+
+	const needs = s.items.filter((i) => i.kind === "review").length;
+	const run = s.items.filter((i) => i.kind === "running").length;
+	const unresolved = s.items.filter((i) => i.kind === "review" && outcomeKind(i.rec) === "review").length;
+	const spend = s.items.reduce((n, i) => (i.kind === "suggest" ? n : n + (i.rec.costUsd ?? 0)), 0);
+
+	const D = chalk.dim;
+	/** A titled edge segment of exact visible width, padded out with box rule. */
+	const seg = (label: string, w: number): string => {
+		const l = label ? ` ${label} ` : "";
+		const shown = truncVis(l, w);
+		return shown + D("─".repeat(Math.max(0, w - visLen(shown))));
+	};
+
+	// Focus is carried by the frame itself: the active pane's title is lit.
+	const chatTitle = s.mode === "chat" ? chalk.bold("CHIEF") : D("chief");
+	const boardTitle = s.mode === "board" ? chalk.bold("BOARD") : D("board");
+	const boardMeta = D(`${run} running · ${needs} need you${unresolved ? ` · ${unresolved} unresolved` : ""} · ${money(spend)}`);
+
+	// Edge segments span the pane PLUS its two padding columns, so the corners land
+	// on the same columns as the "│" separators in the body rows.
+	const rows: string[] = [];
+	rows.push(D("┌─") + seg(`${chalk.bold("☀")} ${chatTitle} ${D(basename(s.targetCwd))}`, Lw + 1) + D("┬─") + seg(`${boardTitle} ${boardMeta}`, Rw + 1) + D("┐"));
+
+	for (let y = 0; y < chatH; y++) {
+		rows.push(`${D("│")} ${padVis(left[y] ?? "", Lw)} ${D("│")} ${padVis(right[y] ?? "", Rw)} ${D("│")}`);
+	}
+
+	// The composer sits inside the left pane, so the frame makes it obvious where typing lands.
+	const composer = s.mode === "chat" ? `${chalk.bold("›")} ${s.buffer}` : D("[Tab to type to the chief]");
+	rows.push(`${D("│")} ${padVis(composer, Lw)} ${D("│")} ${padVis(right[chatH] ?? "", Rw)} ${D("│")}`);
+
+	const spinner = s.busy ? `${"⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[s.spin % 10]} ` : "";
+	const status = s.busy
+		? chalk.cyan(`${spinner}${s.busy}`)
+		: s.toast || D(s.mode === "chat" ? "Enter sends · Tab → board · Ctrl-C detaches" : "↑↓ move · ⏎ act · a merge · r retry · d dismiss · g ideas");
+	const hint = D(s.mode === "chat" ? "Tab → board" : "Tab → chat · q quit");
+	rows.push(D("└─") + seg(status, Lw + 1) + D("┴─") + seg(hint, Rw + 1) + D("┘"));
+
+	// Composer is the last body row; its content starts 4 columns in ("│ › ").
+	return { rows, cursorRow: bodyH + 1, cursorCol: 5 };
 }
 
 function tryConnect(socketPath: string): Promise<Socket | null> {
@@ -214,52 +316,28 @@ export async function runControl(targetCwd: string): Promise<void> {
 	const items = (): Item[] => buildItems(readActive(), suggestions);
 
 	const draw = (): void => {
-		const W = out.columns ?? 100;
-		const H = out.rows ?? 30;
-		const sep = chalk.dim(" │ ");
-		const Lw = Math.max(24, Math.floor((W - 3) * 0.56));
-		const Rw = Math.max(20, W - 3 - Lw);
-		const bodyH = Math.max(3, H - 3);
-
 		const its = items();
 		if (selected >= its.length) selected = Math.max(0, its.length - 1);
-
-		const left = chatPane(transcript, Lw, bodyH);
-		const rightRaw = boardPane(its, selected, mode === "board", Rw, Date.now());
-
-		const needs = its.filter((i) => i.kind === "review").length;
-		const run = its.filter((i) => i.kind === "running").length;
-		const unresolved = its.filter((i) => i.kind === "review" && outcomeKind(i.rec) === "review").length;
-		const spend = its.reduce((n, i) => (i.kind === "suggest" ? n : n + (i.rec.costUsd ?? 0)), 0);
-		const summary = `${basename(targetCwd)} · ${run} running · ${needs} need you${unresolved ? ` (${unresolved} unresolved)` : ""} · ${money(spend)}`;
-		const header = padVis(`  ${chalk.bold("☀ mission control")}  ${chalk.dim(summary)}`, W - 13) + chalk.dim(mode === "chat" ? "[Tab] board " : "[Tab] chat  ");
-
-		const rows: string[] = [header];
-		for (let y = 0; y < bodyH; y++) {
-			rows.push(`${padVis(left[y] ?? "", Lw)}${sep}${padVis(rightRaw[y] ?? "", Rw)}`);
-		}
-
-		const spinner = awaiting || thinking ? `${"⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[spin % 10]} ` : "";
-		const status =
-			awaiting || thinking
-				? chalk.cyan(`  ${spinner}${thinking ? "chief drafting ideas…" : "chief is thinking…"}`)
-				: toast
-					? `  ${toast}`
-					: chalk.dim(
-							mode === "chat"
-								? "  type to the chief · Enter sends · Tab → board · Ctrl-C detaches (org keeps running)"
-								: "  ↑↓ move · ⏎ act · a merge · r retry · d dismiss · g ask chief for ideas · Tab → chat · q quit",
-						);
-		rows.push(padVis(status, W));
-
-		const input = mode === "chat" ? `${chalk.bold(" › ")}${buffer}` : chalk.dim(" [board focus — Tab to type to the chief]");
-		rows.push(padVis(input, W));
+		const { rows, cursorRow, cursorCol } = composeControlFrame({
+			width: out.columns ?? 100,
+			height: out.rows ?? 30,
+			transcript,
+			items: its,
+			selected,
+			mode,
+			buffer,
+			toast,
+			busy: awaiting || thinking ? (thinking ? "chief drafting ideas…" : "chief is thinking…") : "",
+			spin,
+			targetCwd,
+			now: Date.now(),
+		});
 
 		out.write("\x1b[H");
 		out.write(rows.map((l) => l + "\x1b[K").join("\r\n"));
 		out.write("\x1b[J");
 
-		if (mode === "chat") out.write(`\x1b[${H};${4 + buffer.length}H\x1b[?25h`);
+		if (mode === "chat") out.write(`\x1b[${cursorRow};${cursorCol + buffer.length}H\x1b[?25h`);
 		else out.write("\x1b[?25l");
 	};
 

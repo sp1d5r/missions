@@ -5,10 +5,10 @@
  * is still outstanding — rendered as text so they survive the place you most often
  * actually are: a terminal over SSH, with no browser to open the report in.
  *
- * Deliberately not boxed. A working terminal is short, and every row spent on
- * border characters is a row not spent on a handoff. The console register comes
- * from the rules, the uppercase micro-labels and the palette, not from drawing
- * frames around things.
+ * Framed on purpose. Unframed output has no edges, so it reads as one more thing
+ * scrolling past in the log and you lose any sense of where the report begins,
+ * ends, or how much of it there is. The frame turns it into an object on the
+ * screen: fixed width, visible boundary, content held inside it.
  */
 
 import chalk from "chalk";
@@ -28,6 +28,60 @@ const VERDICT: Record<MilestoneVerdict, { label: string; paint: Paint }> = {
 const ANSI = /\x1b\[[0-9;]*m/g;
 /** Visible length — colour codes occupy no columns, so they must not count toward one. */
 const vlen = (s: string): number => s.replace(ANSI, "").length;
+
+const RESET = "\x1b[0m";
+
+/** Pad to a visible width, keeping colour codes intact. */
+function padVis(s: string, w: number): string {
+	const v = vlen(s);
+	return v >= w ? s : s + " ".repeat(w - v);
+}
+
+/** Truncate to a visible width, passing colour codes through and closing them off. */
+function truncVis(s: string, w: number): string {
+	if (vlen(s) <= w) return s;
+	let out = "";
+	let vis = 0;
+	let i = 0;
+	while (i < s.length) {
+		if (s[i] === "\x1b") {
+			const m = s.slice(i).match(/^\x1b\[[0-9;]*m/);
+			if (m) {
+				out += m[0];
+				i += m[0].length;
+				continue;
+			}
+		}
+		if (vis >= w - 1) return `${out}…${RESET}`;
+		out += s[i];
+		vis++;
+		i++;
+	}
+	return out;
+}
+
+const B = { tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│" };
+
+/**
+ * Wrap content in a frame. The title sits in the top edge and the footer in the
+ * bottom edge, so the border costs two rows total rather than four.
+ */
+function boxify(lines: string[], title: string, footer: string, width: number): string[] {
+	const inner = width - 4; // "│ " + content + " │"
+	const dim = chalk.dim;
+	const cap = (edge: "top" | "bottom", label: string): string => {
+		const l = label ? ` ${label} ` : "";
+		const fill = Math.max(2, inner + 2 - vlen(l) - 1);
+		return edge === "top"
+			? dim(B.tl + B.h) + l + dim(B.h.repeat(fill) + B.tr)
+			: dim(B.bl + B.h) + l + dim(B.h.repeat(fill) + B.br);
+	};
+	return [
+		cap("top", title),
+		...lines.map((l) => `${dim(B.v)} ${padVis(truncVis(l, inner), inner)} ${dim(B.v)}`),
+		cap("bottom", footer),
+	];
+}
 
 function fit(s: string, w: number): string {
 	const t = String(s ?? "").replace(/\s+/g, " ").trim();
@@ -112,6 +166,7 @@ export function contractLines(state: MissionState, width: number): string[] {
  */
 export function missionDebrief(state: MissionState, width = 92): string[] {
 	const w = Math.max(60, Math.min(width, 120));
+	const inner = w - 4; // usable columns inside the frame
 	const name = codename(state.id);
 	const clean = state.outcome === "clean";
 	const crashed = state.status === "failed";
@@ -123,13 +178,11 @@ export function missionDebrief(state: MissionState, width = 92): string[] {
 			? chalk.green("CLEAN · safe to merge")
 			: chalk.yellow(`NEEDS YOU${state.finalVerdict ? ` · ${state.finalVerdict}` : ""}`);
 
-	const out: string[] = [];
-	out.push("");
-	out.push(`  ${chalk.bold(name)}  ${fit(state.goal, w - name.length - 6)}`);
-	out.push(`  ${headline}`);
-	out.push(
+	const body: string[] = [];
+	body.push(`${chalk.bold(name)}  ${fit(state.goal, inner - name.length - 4)}`);
+	body.push(
 		chalk.dim(
-			`  ${sc ? `${sc.assertionsPassed}/${sc.assertionsTotal} proven` : "not validated"} · ${sc?.bugs.length ?? 0} bug(s) · ` +
+			`${sc ? `${sc.assertionsPassed}/${sc.assertionsTotal} proven` : "not validated"} · ${sc?.bugs.length ?? 0} bug(s) · ` +
 				`${(state.milestones ?? []).length} milestone(s) · ${state.commits.length} commit(s) · $${state.costUsd.toFixed(2)}`,
 		),
 	);
@@ -138,31 +191,30 @@ export function missionDebrief(state: MissionState, width = 92): string[] {
 	const unruled = (state.milestones ?? []).flatMap((m) => m.handoffs.flatMap((h) => h.issues.filter((i) => !i.disposition)));
 	const undone = (state.milestones ?? []).flatMap((m) => m.handoffs.flatMap((h) => h.leftUndone));
 	if (unruled.length || undone.length) {
-		out.push("");
-		out.push(`  ${rule(chalk.yellow("OUTSTANDING"), "", w - 2)}`);
-		for (const i of unruled) out.push(`    ${chalk.red("⚑")} ${chalk.yellow("unruled:")} ${fit(i.summary, w - 16)}`);
-		for (const u of undone) out.push(`    ${chalk.yellow("↯")} ${chalk.yellow("left undone:")} ${fit(u, w - 20)}`);
+		body.push("");
+		body.push(rule(chalk.yellow("OUTSTANDING"), "", inner));
+		for (const i of unruled) body.push(`  ${chalk.red("⚑")} ${chalk.yellow("unruled:")} ${fit(i.summary, inner - 14)}`);
+		for (const u of undone) body.push(`  ${chalk.yellow("↯")} ${chalk.yellow("left undone:")} ${fit(u, inner - 18)}`);
 	}
 
-	out.push("");
-	out.push(`  ${rule("EXECUTION", "", w - 2)}`);
-	out.push(...missionFlowLines(state, w));
+	body.push("");
+	body.push(rule("EXECUTION", "", inner));
+	body.push(...missionFlowLines(state, inner));
 
-	out.push("");
-	out.push(`  ${rule("CONTRACT", "", w - 2)}`);
-	out.push(...contractLines(state, w));
+	body.push("");
+	body.push(rule("CONTRACT", "", inner));
+	body.push(...contractLines(state, inner));
 
 	const bugs = sc?.bugs ?? [];
 	if (bugs.length) {
-		out.push("");
-		out.push(`  ${rule(chalk.yellow("ADVERSARIAL REVIEW"), "", w - 2)}`);
+		body.push("");
+		body.push(rule(chalk.yellow("ADVERSARIAL REVIEW"), "", inner));
 		for (const b of bugs) {
 			const paint = b.severity === "critical" || b.severity === "high" ? chalk.red : b.severity === "medium" ? chalk.yellow : chalk.dim;
-			out.push(`    ${paint(b.severity.toUpperCase().padEnd(8))} ${fit(b.summary, w - 16)}`);
-			if (b.file) out.push(`             ${chalk.dim(`${b.file}${b.line ? `:${b.line}` : ""}`)}`);
+			body.push(`  ${paint(b.severity.toUpperCase().padEnd(8))} ${fit(b.summary, inner - 14)}`);
+			if (b.file) body.push(`           ${chalk.dim(`${b.file}${b.line ? `:${b.line}` : ""}`)}`);
 		}
 	}
 
-	out.push("");
-	return out;
+	return ["", ...boxify(body, headline, chalk.dim(state.id), w), ""];
 }
