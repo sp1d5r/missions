@@ -218,6 +218,29 @@ export interface MissionConfig {
 	origin?: MissionOrigin;
 }
 
+// ---------------------------------------------------------------------------
+// Structured event log — appended alongside the free-text mission.log so the
+// mission-view timeline pane can render typed events without parsing log strings.
+// ---------------------------------------------------------------------------
+
+export type MissionEventKind =
+	| "status_transition"
+	| "tool_call"
+	| "validation_result"
+	| "milestone_verdict"
+	| "lifecycle"
+	| "error";
+
+export interface MissionEvent {
+	/** ISO timestamp. */
+	at: string;
+	kind: MissionEventKind;
+	/** Short human-readable label shown in the timeline. */
+	label: string;
+	/** Optional extra detail (tool args, assertion id, verdict reason, etc.). */
+	detail?: string;
+}
+
 export interface MissionState {
 	id: string;
 	startedAt: string;
@@ -250,6 +273,8 @@ export interface MissionState {
 	costUsd: number;
 	reportPath?: string;
 	log: string[];
+	/** Structured event log for the timeline pane; appended alongside mission.log. */
+	events?: MissionEvent[];
 }
 
 /** Standup carries intent across days. */

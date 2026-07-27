@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
 import { emitKeypressEvents } from "node:readline";
 import chalk from "chalk";
-import { cmuxOpenBrowser, cmuxOpenWorkspace, hasCmuxPassword, insideCmux } from "./cmux.js";
+import { cmuxOpenBrowser, cmuxOpenMissionView, cmuxOpenWorkspace, hasCmuxPassword, insideCmux } from "./cmux.js";
 import { mergeBranch } from "./git.js";
 import { humanBytes, reclaimBranch, reclaimWorktree } from "./lifecycle.js";
 import { type ActiveRecord, readActive, updateActive } from "./registry.js";
 import { generateSuggestions, loadSuggestions, type Suggestion } from "./suggest.js";
+import { runMissionView } from "./mission-view.js";
 
 const RUNNING = new Set(["planning", "working", "validating", "reporting"]);
 
@@ -109,11 +110,11 @@ export function buildItems(records: ActiveRecord[], suggestions: Suggestion[]): 
 function actionsFor(item: Item): string {
 	if (item.kind === "review") {
 		const kind = outcomeKind(item.rec);
-		if (kind === "failed") return "⏎ report · r retry · d dismiss";
-		if (kind === "review") return `⏎ report · ${chalk.yellow("a merge anyway")} · r retry · w worktree · d dismiss`;
-		return "⏎ report · a accept+merge · w worktree · d dismiss";
+		if (kind === "failed") return "⏎ view · r retry · d dismiss";
+		if (kind === "review") return `⏎ view · ${chalk.yellow("a merge anyway")} · r retry · w worktree · d dismiss`;
+		return "⏎ view · a accept+merge · w worktree · d dismiss";
 	}
-	if (item.kind === "running") return "⏎ worktree · o report";
+	if (item.kind === "running") return "⏎ view · o open-in-tab · w tree";
 	return `⏎ dispatch · e edit${item.sug.rationale ? chalk.dim(` — ${item.sug.rationale}`) : ""}`;
 }
 
@@ -255,7 +256,7 @@ export function runBoardTui(): Promise<void> {
 		};
 
 		const cleanup = (): void => {
-			clearInterval(timer);
+			if (timerRef.current) clearInterval(timerRef.current);
 			process.stdin.removeListener("keypress", onKey);
 			if (process.stdin.isTTY) process.stdin.setRawMode(false);
 			out.write("\x1b[?25h\x1b[?1049l");
@@ -270,21 +271,52 @@ export function runBoardTui(): Promise<void> {
 			return active[0]?.repo;
 		};
 
+		// Derive the outDir for a mission record (conventional path).
+		const outDirFor = (rec: ActiveRecord): string | undefined => {
+			// eslint-disable-next-line @typescript-eslint/no-require-imports
+			const { join: pathJoin } = require("node:path") as typeof import("node:path");
+			// eslint-disable-next-line @typescript-eslint/no-require-imports
+			const { existsSync: fsExists } = require("node:fs") as typeof import("node:fs");
+			const candidate = pathJoin(rec.repo, ".missions", "runs", rec.id);
+			return fsExists(pathJoin(candidate, "state.json")) ? candidate : undefined;
+		};
+
+		// Mutable timer reference so act() can clear and restart it.
+		const timerRef = { current: null as ReturnType<typeof setInterval> | null };
+
 		const act = (item: Item): void => {
-			if (item.kind === "review") {
-				const r = item.rec;
-				if (r.reportPath) {
-					if (insideCmux() && hasCmuxPassword()) cmuxOpenBrowser(r.reportPath);
-					else toast = chalk.dim(`report: ${r.reportPath}`);
-				} else toast = chalk.dim("no report yet");
-			} else if (item.kind === "running") {
-				if (item.rec.worktreePath) {
-					if (insideCmux()) cmuxOpenWorkspace(item.rec.worktreePath);
-					else toast = chalk.dim(`worktree: ${item.rec.worktreePath}`);
-				}
-			} else {
+			if (item.kind === "suggest") {
 				dispatch(item.sug.repo, item.sug.goal);
 				toast = chalk.green(`▶ dispatched: ${item.sug.goal.slice(0, 60)}`);
+				return;
+			}
+			// Both running and review: navigate in-place to the mission view.
+			const rec = item.rec;
+			const od = outDirFor(rec);
+			if (od) {
+				// Pause the board, open the view, then resume the board on return.
+				if (timerRef.current) clearInterval(timerRef.current);
+				process.stdin.removeListener("keypress", onKey);
+				if (process.stdin.isTTY) process.stdin.setRawMode(false);
+				out.write("\x1b[?25h\x1b[?1049l");
+				runMissionView(od).then(() => {
+					// Resume board after returning from view
+					out.write("\x1b[?1049h\x1b[?25l");
+					emitKeypressEvents(process.stdin);
+					if (process.stdin.isTTY) process.stdin.setRawMode(true);
+					process.stdin.resume();
+					process.stdin.on("keypress", onKey);
+					timerRef.current = setInterval(draw, 1500);
+					draw();
+				});
+			} else if (item.kind === "review" && rec.reportPath) {
+				if (insideCmux() && hasCmuxPassword()) cmuxOpenBrowser(rec.reportPath);
+				else toast = chalk.dim(`report: ${rec.reportPath}`);
+			} else if (item.kind === "running" && rec.worktreePath) {
+				if (insideCmux()) cmuxOpenWorkspace(rec.worktreePath);
+				else toast = chalk.dim(`worktree: ${rec.worktreePath}`);
+			} else {
+				toast = chalk.dim("no mission output dir found");
 			}
 		};
 
@@ -375,9 +407,15 @@ export function runBoardTui(): Promise<void> {
 			} else if (key.name === "o") {
 				const item = items[selected];
 				const rec = item && item.kind !== "suggest" ? item.rec : undefined;
-				if (rec?.reportPath) {
-					if (insideCmux() && hasCmuxPassword()) cmuxOpenBrowser(rec.reportPath);
-					else toast = chalk.dim(`report: ${rec.reportPath}`);
+				if (rec) {
+					// Open the mission view in a new cmux tab using a stable runId-keyed workspace name.
+					const viewCmd = `${process.execPath} ${process.argv[1]} view ${rec.id}`;
+					if (insideCmux()) {
+						const ok = cmuxOpenMissionView(rec.id, viewCmd, rec.repo);
+						if (!ok) toast = chalk.dim(`missions view ${rec.id}`);
+					} else {
+						toast = chalk.dim(`missions view ${rec.id}`);
+					}
 				}
 			} else if (key.name === "w") {
 				const item = items[selected];
@@ -428,7 +466,7 @@ export function runBoardTui(): Promise<void> {
 		process.stdin.resume();
 		process.stdin.on("keypress", onKey);
 		if (!suggestions.length) toast = chalk.dim("press g for chief-generated mission ideas");
-		const timer = setInterval(draw, 1500);
+		timerRef.current = setInterval(draw, 1500);
 		draw();
 	});
 }

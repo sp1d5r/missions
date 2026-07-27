@@ -17,6 +17,7 @@ import { deepClean, humanBytes, renderSweep, sweep } from "./lifecycle.js";
 import { autoRouting } from "./models.js";
 import { StateStore } from "./state.js";
 import { runBoardTui } from "./tui.js";
+import { runMissionView } from "./mission-view.js";
 import type { MissionConfig } from "./types.js";
 import { ytDlpPath } from "./youtube.js";
 
@@ -105,6 +106,7 @@ Usage:
   missions stop                                  Stop the org (running missions are abandoned)
   missions gc [--target <repo>] [--dry-run] [--deep]  Reclaim worktrees from finished missions; delete merged branches
   missions peek [--target <repo>]                Read-only board TUI, no chief attached (quick glance)
+  missions view <runId> [--out <dir>]            Per-mission TUI: timeline · log tail · overseer chat
   missions attach [--target <repo>]              Text-only chief chat, no board pane (dumb terminals)
   missions run --target <repo> --goal "..." [--rfc @file|text] [flags]   Non-interactive single mission
   missions status --out <mission-out-dir>
@@ -302,6 +304,28 @@ async function main(): Promise<void> {
 		process.stdout.write(`${missionDebrief(s, process.stdout.columns ?? 92).join("\n")}\n`);
 		process.stdout.write(chalk.dim(`  ${s.id} · ${s.status}\n`));
 		if (s.reportPath) process.stdout.write(chalk.dim(`  report: ${s.reportPath}\n\n`));
+		return;
+	}
+
+	if (f.cmd === "view") {
+		// Accept either a full outDir (--out) or a runId positional arg (prefix-resolved).
+		const runIdArg = f.args[0] ?? f.out;
+		if (!runIdArg) throw new Error("view requires a runId or --out <mission-out-dir>");
+		// If it looks like a path with state.json, use it directly.
+		let outDir: string | undefined;
+		if (existsSync(resolve(runIdArg, "state.json"))) {
+			outDir = resolve(runIdArg);
+		} else {
+			// Try to resolve as a runId prefix against active records.
+			const { resolveRunId } = await import("./mission-view.js");
+			const resolved = resolveRunId(runIdArg);
+			if (resolved) outDir = resolved.outDir;
+		}
+		if (!outDir) {
+			process.stderr.write(chalk.red(`Cannot resolve run "${runIdArg}" — pass a full outDir or a unique runId prefix.\n`));
+			process.exit(1);
+		}
+		await runMissionView(outDir);
 		return;
 	}
 

@@ -1,15 +1,17 @@
+import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { connect, type Socket } from "node:net";
-import { basename } from "node:path";
+import { basename, join } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import chalk from "chalk";
-import { cmuxOpenBrowser, cmuxOpenWorkspace, hasCmuxPassword, insideCmux } from "./cmux.js";
+import { cmuxOpenBrowser, cmuxOpenMissionView, cmuxOpenWorkspace, hasCmuxPassword, insideCmux } from "./cmux.js";
 import { mergeBranch } from "./git.js";
 import { humanBytes, reclaimBranch, reclaimWorktree } from "./lifecycle.js";
 import { daemonExists, drainFrames, encode, orgSocketPath } from "./ipc.js";
 import { type ActiveRecord, readActive, updateActive } from "./registry.js";
 import { generateSuggestions, loadSuggestions, type Suggestion } from "./suggest.js";
 import { buildItems, type Item, milestoneLabel, money, outcomeColor, outcomeKind, outcomeSymbol, verdictLabel } from "./tui.js";
+import { runMissionView } from "./mission-view.js";
 import { registerWorkspace } from "./workspaces.js";
 
 const ESC = "\x1b";
@@ -144,12 +146,12 @@ function boardPane(items: Item[], selected: number, focused: boolean, w: number,
 			const hint =
 				item.kind === "review"
 					? outcomeKind(item.rec) === "failed"
-						? "⏎ report · r retry · d dismiss"
+						? "⏎ view · r retry · d dismiss"
 						: outcomeKind(item.rec) === "review"
-							? `⏎ report · ${chalk.yellow("a merge anyway")} · r retry · d dismiss`
-							: "⏎ report · a merge · w tree · d dismiss"
+							? `⏎ view · ${chalk.yellow("a merge anyway")} · r retry · d dismiss`
+							: "⏎ view · a merge · w tree · d dismiss"
 					: item.kind === "running"
-						? "⏎ worktree · o report"
+						? "⏎ view · o open-in-tab · w tree"
 						: "⏎ dispatch";
 			lines.push(chalk.dim(`   ${hint}`));
 		}
@@ -338,6 +340,8 @@ export async function runControl(targetCwd: string): Promise<void> {
 	let thinking = false;
 	let spin = 0;
 	let alive = true;
+	/** Mutable ref so boardKey() can clear and restart the spinner timer. */
+	const timerHolder: { timer: ReturnType<typeof setInterval> | null } = { timer: null };
 
 	const append = (text: string): void => {
 		transcript += text;
@@ -451,6 +455,12 @@ export async function runControl(targetCwd: string): Promise<void> {
 		return got.bytes ? chalk.dim(` · ${humanBytes(got.bytes)} reclaimed`) : "";
 	};
 
+	/** Derive the outDir for a mission record (conventional path). */
+	const outDirFor = (rec: import("./registry.js").ActiveRecord): string | undefined => {
+		const candidate = join(rec.repo, ".missions", "runs", rec.id);
+		return existsSync(join(candidate, "state.json")) ? candidate : undefined;
+	};
+
 	const boardKey = (name: string): void => {
 		// Any key other than a second `a` cancels a pending merge confirmation.
 		if (name !== "a") pendingMerge = null;
@@ -464,12 +474,35 @@ export async function runControl(targetCwd: string): Promise<void> {
 			if (item.kind === "suggest") {
 				dispatch(item.sug.repo, item.sug.goal);
 				toast = chalk.green(`▶ dispatched: ${item.sug.goal.slice(0, 50)}`);
-			} else if (item.kind === "running" && item.rec.worktreePath) {
-				if (insideCmux()) cmuxOpenWorkspace(item.rec.worktreePath);
-				else toast = chalk.dim(`worktree: ${item.rec.worktreePath}`);
-			} else if (item.kind === "review" && item.rec.reportPath) {
-				if (insideCmux() && hasCmuxPassword()) cmuxOpenBrowser(item.rec.reportPath);
-				else toast = chalk.dim(`report: ${item.rec.reportPath}`);
+			} else {
+				// Both running and review: navigate in-place to the mission view (Esc or q returns to board).
+				const od = outDirFor(item.rec);
+				if (od) {
+					// Pause the control TUI, show the mission view, then resume.
+					if (timerHolder.timer) clearInterval(timerHolder.timer);
+					process.stdin.removeListener("keypress", onKey);
+					if (process.stdin.isTTY) process.stdin.setRawMode(false);
+					out.write("\x1b[?25h\x1b[?1049l");
+					void runMissionView(od).then(() => {
+						if (!alive) return;
+						out.write("\x1b[?1049h");
+						emitKeypressEvents(process.stdin);
+						if (process.stdin.isTTY) process.stdin.setRawMode(true);
+						process.stdin.resume();
+						process.stdin.on("keypress", onKey);
+						// Restart the spinner/draw timer
+						timerHolder.timer = setInterval(() => { spin++; draw(); }, 500);
+						draw();
+					});
+				} else if (item.kind === "review" && item.rec.reportPath) {
+					if (insideCmux() && hasCmuxPassword()) cmuxOpenBrowser(item.rec.reportPath);
+					else toast = chalk.dim(`report: ${item.rec.reportPath}`);
+				} else if (item.kind === "running" && item.rec.worktreePath) {
+					if (insideCmux()) cmuxOpenWorkspace(item.rec.worktreePath);
+					else toast = chalk.dim(`worktree: ${item.rec.worktreePath}`);
+				} else {
+					toast = chalk.dim("no mission output dir found");
+				}
 			}
 		} else if (name === "a" && item.kind === "review") acceptMerge(item.rec);
 		else if (name === "r" && item.kind === "review") {
@@ -481,9 +514,15 @@ export async function runControl(targetCwd: string): Promise<void> {
 			const note = reclaimFor(item.rec, "dismissed");
 			updateActive(item.rec.id, { cleared: true });
 			toast = chalk.dim("dismissed") + note;
-		} else if (name === "o" && item.kind !== "suggest" && item.rec.reportPath) {
-			if (insideCmux() && hasCmuxPassword()) cmuxOpenBrowser(item.rec.reportPath);
-			else toast = chalk.dim(`report: ${item.rec.reportPath}`);
+		} else if (name === "o" && item.kind !== "suggest") {
+			// Open the mission view in a new cmux tab using a stable runId-keyed workspace name.
+			const viewCmd = `${process.execPath} ${process.argv[1]} view ${item.rec.id}`;
+			if (insideCmux()) {
+				const ok = cmuxOpenMissionView(item.rec.id, viewCmd, item.rec.repo);
+				if (!ok) toast = chalk.dim(`missions view ${item.rec.id}`);
+			} else {
+				toast = chalk.dim(`missions view ${item.rec.id}`);
+			}
 		} else if (name === "w" && item.kind !== "suggest" && item.rec.worktreePath) {
 			if (insideCmux()) cmuxOpenWorkspace(item.rec.worktreePath);
 			else toast = chalk.dim(`worktree: ${item.rec.worktreePath}`);
@@ -493,7 +532,7 @@ export async function runControl(targetCwd: string): Promise<void> {
 	const cleanup = (): void => {
 		if (!alive) return;
 		alive = false;
-		clearInterval(timer);
+		if (timerHolder.timer) clearInterval(timerHolder.timer);
 		if (pending) clearTimeout(pending);
 		process.stdout.removeListener("resize", onResize);
 		process.stdin.removeListener("keypress", onKey);
@@ -565,7 +604,7 @@ export async function runControl(targetCwd: string): Promise<void> {
 	process.stdin.resume();
 	process.stdin.on("keypress", onKey);
 	process.stdout.on("resize", onResize);
-	const timer = setInterval(() => {
+	timerHolder.timer = setInterval(() => {
 		spin++;
 		draw();
 	}, 500);

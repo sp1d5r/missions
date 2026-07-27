@@ -65,3 +65,30 @@ export function cmuxFeedInstalled(): boolean {
 	const home = process.env.HOME ?? "";
 	return Boolean(home) && existsSync(join(home, ".pi", "agent", "extensions", "cmux-session.ts"));
 }
+
+/**
+ * Open (or focus) a mission-view tab in cmux using a stable workspace name derived
+ * from the runId: `mission-<runId>`. This ensures that pressing `o` a second time
+ * on the same row focuses the existing tab rather than spawning a new one.
+ *
+ * cmux does not currently have a named-workspace focus command separate from open;
+ * we pass the stable name via the `--workspace-name` flag. If the flag is not
+ * supported by the installed cmux version the open will still work but will create
+ * a new tab each time rather than focusing the existing one.
+ *
+ * @param runId  The mission runId (e.g. "m-2026-01-01T00-00-00-000Z")
+ * @param command  The shell command to run in the tab (e.g. `missions view <runId>`)
+ * @param cwd  Optional working directory for the shell
+ */
+export function cmuxOpenMissionView(runId: string, command: string, cwd?: string): boolean {
+	// Stable workspace name keyed by runId so repeat o-presses focus rather than spawn.
+	const workspaceName = `mission-${runId}`;
+	// Try named-workspace open first (focuses existing if name matches).
+	// `cmux workspace open --name <name> --command <cmd>` is the preferred form;
+	// fall back to plain cmux open if the named form is unsupported.
+	const args: string[] = ["workspace", "open", "--name", workspaceName, "--command", command];
+	if (cwd) {
+		args.push("--cwd", cwd);
+	}
+	return run(args);
+}

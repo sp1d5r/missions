@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { appendFileSync } from "node:fs";
 import { join } from "node:path";
-import type { MissionConfig, MissionState } from "./types.js";
+import type { MissionConfig, MissionEvent, MissionEventKind, MissionState } from "./types.js";
 
 /** Persists MissionState to <outDir>/state.json and a tail-able <outDir>/mission.log. */
 export class StateStore {
@@ -36,6 +36,7 @@ export class StateStore {
 			commits: [],
 			costUsd: 0,
 			log: [],
+			events: [],
 		};
 		return new StateStore(outDir, state);
 	}
@@ -56,6 +57,14 @@ export class StateStore {
 		const line = `[${new Date().toISOString()}] ${message}`;
 		this.state.log.push(line);
 		appendFileSync(this.logPath, `${line}\n`);
+		this.save();
+	}
+
+	/** Append a structured event to the event log (used by the timeline pane). */
+	appendEvent(kind: MissionEventKind, label: string, detail?: string): void {
+		const event: MissionEvent = { at: new Date().toISOString(), kind, label, detail };
+		if (!this.state.events) this.state.events = [];
+		this.state.events.push(event);
 		this.save();
 	}
 }
