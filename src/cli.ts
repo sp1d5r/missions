@@ -14,6 +14,8 @@ import { runDaemon, stopOrg } from "./daemon.js";
 import { runMission } from "./mission.js";
 import { forgetWorkspace, listWorkspaces, registerWorkspace } from "./workspaces.js";
 import { deepClean, humanBytes, renderSweep, sweep } from "./lifecycle.js";
+import { renderRun, runRoutine } from "./routine-run.js";
+import { clearLedger, dueRoutines, isDue, ledgerSize, listRoutines, recentRuns, removeRoutine, saveRoutine, type Routine, type RoutineKind } from "./routines.js";
 import { autoRouting } from "./models.js";
 import { StateStore } from "./state.js";
 import { runBoardTui } from "./tui.js";
@@ -39,6 +41,10 @@ interface Flags {
 	help: boolean;
 	/** gc only: also prune shared package-manager caches (machine-wide). */
 	deep: boolean;
+	/** routine add: minutes between runs. */
+	every?: number;
+	/** routine add: let it start missions itself. */
+	dispatchAuto: boolean;
 	/** gc only: report what would be removed and touch nothing. */
 	dryRun: boolean;
 	socket?: string;
@@ -60,6 +66,7 @@ function parseArgs(argv: string[]): Flags {
 		open: false,
 		help: false,
 		deep: false,
+		dispatchAuto: false,
 		dryRun: false,
 		args: [],
 	};
@@ -90,6 +97,8 @@ function parseArgs(argv: string[]): Flags {
 		else if (a === "--open") f.open = true;
 		else if (a === "--dry-run") f.dryRun = true;
 		else if (a === "--deep") f.deep = true;
+		else if (a === "--every") f.every = Number.parseInt(next(), 10);
+		else if (a === "--dispatch") f.dispatchAuto = true;
 		else if (a.startsWith("-")) throw new Error(`Unknown flag: ${a}`);
 		else f.args.push(a);
 	}
@@ -112,6 +121,14 @@ Usage:
   missions status --out <mission-out-dir>
   missions changelog [--target <repo>]            Regenerate CHANGELOG.md from every mission's state.json
   missions brief [--target <repo>] [--query "..."] [--max-videos <n>]   Watch recent talks, ground every claim against this repo
+
+Standing orders — recurring work the org does without being asked (research / plan / bugbash):
+  missions routine list                          What is scheduled, when it last ran, what it found
+  missions routine add <kind> [id] [--target <repo>] [--every <min>] [--goal "scope"] [--dispatch]
+  missions routine run [id] [--dry-run]          Run now (no id = everything due)
+  missions routine log                           Recent runs
+  missions routine forget [id]                   Clear the "already told you" ledger so findings resurface
+  missions routine rm <id>
 
 Flags:
   --target <path>     Target repo to work on (default: cwd)
@@ -160,6 +177,101 @@ function buildConfig(f: Flags, goal: string, rfc: string): MissionConfig {
 		checkCommand: f.check,
 		target: targetKind,
 	};
+}
+
+/**
+ * Standing orders. Sub-commands rather than flags because these are nouns you
+ * manage over time, not one-shot options.
+ */
+async function routineCommand(f: Flags): Promise<void> {
+	const sub = f.args[0] ?? "list";
+	const out = process.stdout;
+
+	if (sub === "list") {
+		const all = listRoutines();
+		if (!all.length) {
+			out.write(chalk.dim("no standing orders yet\n\n"));
+			out.write(`  ${chalk.bold("missions routine add")} <research|plan|bugbash> [--target <repo>] [--every <minutes>] [--scope "..."] [--dispatch]\n`);
+			return;
+		}
+		for (const r of all) {
+			const when = r.lastRunAt ? `last ${new Date(r.lastRunAt).toLocaleString()}` : "never run";
+			const due = isDue(r) ? chalk.cyan(" · due") : "";
+			out.write(
+				`${r.enabled ? chalk.bold("●") : chalk.dim("○")} ${chalk.bold(r.id.padEnd(22))} ${r.kind.padEnd(9)} ${chalk.dim(basename(r.repo).padEnd(14))} ` +
+					`${chalk.dim(`every ${r.everyMinutes}m · ${r.autonomy}`)}${due}\n`,
+			);
+			out.write(chalk.dim(`  ${when}${r.lastSummary ? ` — ${r.lastSummary}` : ""}\n`));
+		}
+		out.write(chalk.dim(`\n  ledger holds ${ledgerSize()} finding(s) already reported\n`));
+		return;
+	}
+
+	if (sub === "add") {
+		const kind = f.args[1] as RoutineKind | undefined;
+		if (!kind || !["research", "plan", "bugbash"].includes(kind)) {
+			throw new Error("routine add requires a kind: research | plan | bugbash");
+		}
+		const repo = resolve(f.target);
+		registerWorkspace(repo);
+		const id = f.args[2] ?? `${kind}-${basename(repo)}`;
+		const r: Routine = {
+			id,
+			kind,
+			repo,
+			// Daily by default. These are jobs you would do on a Sunday, not a poller.
+			everyMinutes: f.every ?? 24 * 60,
+			autonomy: f.dispatchAuto ? "dispatch" : "propose",
+			enabled: true,
+			queries: f.queries.length ? f.queries : undefined,
+			scope: f.goal || undefined,
+			maxUsd: f.budget,
+		};
+		saveRoutine(r);
+		out.write(`${chalk.bold("added")} ${r.id} — ${r.kind} on ${basename(repo)}, every ${r.everyMinutes}m, ${chalk.bold(r.autonomy)}\n`);
+		if (r.autonomy === "dispatch") out.write(chalk.yellow("  it will START missions on its own. They land on branches and are never merged.\n"));
+		return;
+	}
+
+	if (sub === "rm") {
+		const id = f.args[1];
+		if (!id) throw new Error("routine rm requires an id");
+		out.write(removeRoutine(id) ? `removed ${id}\n` : chalk.yellow(`no routine "${id}"\n`));
+		return;
+	}
+
+	if (sub === "run") {
+		const id = f.args[1];
+		const all = listRoutines();
+		const chosen = id ? all.filter((r) => r.id === id) : dueRoutines();
+		if (!chosen.length) {
+			out.write(chalk.dim(id ? `no routine "${id}"\n` : "nothing due\n"));
+			return;
+		}
+		for (const r of chosen) {
+			const run = await runRoutine(r, { dryRun: f.dryRun, onProgress: (m) => out.write(chalk.dim(`  ${m}\n`)) });
+			out.write(`\n${renderRun(run).join("\n")}\n`);
+		}
+		return;
+	}
+
+	if (sub === "forget") {
+		const n = clearLedger(f.args[1]);
+		out.write(`forgot ${n} recorded finding(s)${f.args[1] ? ` for ${f.args[1]}` : ""} — they may surface again\n`);
+		return;
+	}
+
+	if (sub === "log") {
+		const runs = recentRuns(15);
+		if (!runs.length) return void out.write(chalk.dim("no runs yet\n"));
+		for (const r of runs) {
+			out.write(`${chalk.dim(new Date(r.at).toLocaleString())} ${chalk.bold(r.routineId)} ${chalk.dim(`$${r.costUsd.toFixed(3)}`)}\n`);
+			out.write(`  ${r.findings.length} new${r.repeats ? `, ${r.repeats} suppressed` : ""}${r.note ? ` — ${r.note}` : ""}\n`);
+		}
+		return;
+	}
+
+	throw new Error(`unknown: missions routine ${sub}. Try list | add | rm | run | forget | log`);
 }
 
 function openFile(path: string): void {
@@ -281,6 +393,11 @@ async function main(): Promise<void> {
 		if (dry && (result.reclaimed.some((r) => !r.skipped) || result.droppedRecords)) {
 			process.stdout.write(chalk.dim("\n  run without --dry-run to apply\n"));
 		}
+		return;
+	}
+
+	if (f.cmd === "routine") {
+		await routineCommand(f);
 		return;
 	}
 

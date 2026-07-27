@@ -31,6 +31,36 @@ export function loadSuggestions(): Suggestion[] {
 	return Object.values(readCache()).flatMap((e) => e.items);
 }
 
+/**
+ * Add suggestions without clobbering what is already queued for that repo.
+ *
+ * `generateSuggestions` replaces a repo's list wholesale, which is right when
+ * you press `g` and want a fresh read. A routine firing overnight must not
+ * silently delete the ideas you were about to action, so it merges instead —
+ * matching on goal text, since the same finding re-proposed is the same row.
+ */
+export function addSuggestions(repo: string, items: Suggestion[]): number {
+	if (!items.length) return 0;
+	const cache = readCache();
+	const existing = cache[repo]?.items ?? [];
+	const have = new Set(existing.map((s) => s.goal.trim().toLowerCase()));
+	const fresh = items.filter((s) => s.goal?.trim() && !have.has(s.goal.trim().toLowerCase()));
+	if (!fresh.length) return 0;
+	cache[repo] = { at: new Date().toISOString(), items: [...existing, ...fresh] };
+	mkdirSync(missionsRoot(), { recursive: true });
+	writeFileSync(CACHE(), JSON.stringify(cache, null, 2));
+	return fresh.length;
+}
+
+/** Drop one suggestion (it became a mission, or you dismissed it). */
+export function removeSuggestion(repo: string, goal: string): void {
+	const cache = readCache();
+	const entry = cache[repo];
+	if (!entry) return;
+	entry.items = entry.items.filter((s) => s.goal.trim().toLowerCase() !== goal.trim().toLowerCase());
+	writeFileSync(CACHE(), JSON.stringify(cache, null, 2));
+}
+
 function gitLog(repo: string): string {
 	try {
 		return execFileSync("git", ["log", "-8", "--pretty=%s"], { cwd: repo, encoding: "utf-8", maxBuffer: 1 << 20 }).toString().trim();

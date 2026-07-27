@@ -1,7 +1,9 @@
 import { execFileSync } from "node:child_process";
 import { createServer, type Socket } from "node:net";
 import { drainFrames, encode, legacySocketPaths, orgPidPath, readOrgPid, removeSocket, writeOrgPid } from "./ipc.js";
-import { createChiefSession } from "./chief.js";
+import { createChiefSession, type ChiefSession } from "./chief.js";
+import { renderRun, runRoutine } from "./routine-run.js";
+import { dueRoutines } from "./routines.js";
 import { registerWorkspace } from "./workspaces.js";
 
 /**
@@ -62,6 +64,13 @@ export async function runDaemon(homeCwd: string, socketPath: string): Promise<vo
 	await new Promise<void>((resolveListen) => server.listen(socketPath, resolveListen));
 	writeOrgPid(process.pid);
 
+	// Standing orders live here rather than in launchd or cron, for one practical
+	// reason: this process already has the environment of the terminal that started
+	// it, including the API key. A launchd job gets a bare environment and would
+	// need the key copied somewhere on disk to work at all.
+	const scheduler = startScheduler(session);
+	process.on("exit", () => clearInterval(scheduler));
+
 	const shutdown = () => {
 		try {
 			server.close();
@@ -78,6 +87,47 @@ export async function runDaemon(homeCwd: string, socketPath: string): Promise<vo
 
 	// Keep the process alive indefinitely (the org runs until explicitly stopped).
 	await new Promise<never>(() => {});
+}
+
+/** How often the org checks whether any standing order has come due. */
+const TICK_MS = 5 * 60_000;
+
+/**
+ * Run due routines, one at a time, forever.
+ *
+ * Serialised deliberately. Routines are not urgent — being twenty minutes late
+ * to a daily job costs nothing — and running several at once would put a
+ * bugbash's four scouts in contention with a research job's transcript
+ * downloads while a human is trying to get a mission planned.
+ */
+function startScheduler(session: ChiefSession): NodeJS.Timeout {
+	let busy = false;
+	const tick = async () => {
+		if (busy) return;
+		const due = dueRoutines();
+		if (!due.length) return;
+		busy = true;
+		try {
+			for (const r of due) {
+				const run = await runRoutine(r, {
+					onProgress: (m) => session.notify(`  ${m}`),
+					// A routine at `dispatch` hands the goal to the chief, which owns the
+					// mission cap — so standing orders and the human share one queue.
+					dispatch: (repo, goal, rationale) => session.dispatchMission(repo, goal, rationale),
+				});
+				if (run.findings.length || run.dispatched.length) {
+					session.notify(`[routine] ${renderRun(run).join("\n")}`);
+				}
+			}
+		} catch (err) {
+			session.notify(`[routine] scheduler error: ${err instanceof Error ? err.message : String(err)}`);
+		} finally {
+			busy = false;
+		}
+	};
+	// First tick soon after start, so a routine added while detached does not wait.
+	setTimeout(() => void tick(), 30_000);
+	return setInterval(() => void tick(), TICK_MS);
 }
 
 function daemonPids(): number[] {

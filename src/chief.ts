@@ -303,6 +303,16 @@ export interface ChiefSession {
 	input(text: string): void;
 	/** Point the chief at the repo a terminal is attached from. */
 	setFocus(cwd: string): void;
+	/**
+	 * Show something to whoever is attached, without asking the chief to reply.
+	 *
+	 * A standing order's report is not a turn of conversation — it should appear
+	 * on your screen and cost nothing. Routing it through `input` would make the
+	 * chief answer its own scheduler.
+	 */
+	notify(text: string): void;
+	/** Start a mission the way the chief would, so the cap is shared with human-dispatched work. */
+	dispatchMission(repo: string, goal: string, rfc?: string): void;
 	/** Register an output listener (raw text incl. ANSI). Returns an unsubscribe fn. */
 	subscribe(cb: (text: string) => void): () => void;
 	/** The intro banner. */
@@ -406,6 +416,13 @@ export function createChiefSession(homeCwd: string): ChiefSession {
 			// Read tools are bound to a cwd at construction, so they are rebuilt to follow.
 			agent.state.tools = buildTools(() => focus, () => runnerRef);
 			emit(chalk.dim(`  · focus → ${basename(full)}\n`));
+		},
+		notify(text: string) {
+			emit(`\n${chalk.dim(text.replace(/\n?$/, "\n"))}`);
+		},
+		dispatchMission(repo: string, goal: string, rfc?: string) {
+			registerWorkspace(repo);
+			runnerRef.enqueue({ repo, goal, rfc: rfc ?? "", maxFeatures: 1 });
 		},
 		subscribe(cb) {
 			listeners.add(cb);
