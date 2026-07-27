@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import type { CheckResult } from "../types.js";
+import type { AssertionStrength, CheckResult } from "../types.js";
 
 /** Exit code we report for a command the harness refused to run. Distinct from any real failure. */
 export const REFUSED_EXIT_CODE = 126;
@@ -64,4 +64,128 @@ function detectForeignPath(command: string, cwd: string, foreignRoot?: string): 
 	if (!foreignRoot || cwd === foreignRoot) return null;
 	const withoutWorktree = command.split(cwd).join("");
 	return withoutWorktree.includes(foreignRoot) ? foreignRoot : null;
+}
+
+/**
+ * Pure filesystem-inspection commands: these only READ the filesystem without executing the
+ * feature under test. A bash-command assertion whose entire command string is composed only of
+ * these tools can only prove existence, not behaviour.
+ */
+const FILESYSTEM_ONLY_COMMANDS = new Set([
+	"test", "ls", "stat", "find", "grep", "cat", "head", "tail", "wc", "[",
+	"echo", "printf", "true", "false", ":",
+]);
+
+/**
+ * Tokenise a shell command string into individual program invocations.
+ *
+ * Splits on shell operators (&&, ||, |, ;, &&) and parentheses, then extracts the
+ * first token (the command name) of each pipeline segment.
+ * This is heuristic and intentionally conservative: if any token looks like it might
+ * execute something, we return false.
+ */
+function commandTokens(command: string): string[] {
+	// Strip quoted strings (they're arguments, not commands)
+	const stripped = command.replace(/'[^']*'|"[^"]*"/g, "''");
+	// Split on shell control operators
+	const segments = stripped.split(/[;&|(){}\n]+/);
+	return segments
+		.map((seg) => seg.trim())
+		.filter((seg) => seg.length > 0)
+		.map((seg) => {
+			// Handle `env VAR=val cmd` and `! cmd` negation
+			const tokens = seg.split(/\s+/);
+			let idx = 0;
+			while (idx < tokens.length) {
+				const t = tokens[idx];
+				if (!t || t === "!") { idx++; continue; }
+				// Skip `VAR=value` assignments
+				if (/^[A-Z_][A-Z0-9_]*=/.test(t)) { idx++; continue; }
+				return t;
+			}
+			return "";
+		})
+		.filter((t) => t.length > 0);
+}
+
+/**
+ * Classify the strength of a bash-command assertion's command string.
+ *
+ * Rules:
+ * - If every invocation in the command is a pure filesystem-inspection tool
+ *   (test, ls, stat, find, grep, cat, head, wc, `[`, etc.), returns 'existence'.
+ * - Otherwise returns 'behavioural'.
+ *
+ * This function is used to downgrade declared 'behavioural' assertions; it never upgrades.
+ * Non-bash assertions should not be passed here (they keep their declared strength).
+ */
+export function classifyCommandStrength(command: string): AssertionStrength {
+	const tokens = commandTokens(command);
+	if (tokens.length === 0) return "existence";
+	const allFilesystem = tokens.every((t) => {
+		// Strip path prefix (e.g. /usr/bin/test -> test)
+		const base = t.includes("/") ? t.split("/").pop() ?? t : t;
+		return FILESYSTEM_ONLY_COMMANDS.has(base);
+	});
+	return allFilesystem ? "existence" : "behavioural";
+}
+
+/**
+ * Annotate a CLEAN verdict with an existence-only warning when no behavioural assertions passed.
+ *
+ * Rules:
+ * - If the verdict is not CLEAN (i.e. not "passed"), return it unchanged.
+ * - If at least one 'behavioural' assertion passed, return "CLEAN" unchanged.
+ * - If every passed assertion was existence/review/unclassified, append the annotation.
+ *
+ * @param verdictStr - The raw verdict string (e.g. "CLEAN" or "NEEDS YOU (stalled)").
+ * @param scoreCard - The ScoreCard with strengthBreakdown.
+ * @returns The verdict string, possibly annotated.
+ */
+export function annotateVerdict(
+	verdictStr: string,
+	scoreCard: { strengthBreakdown?: { behavioural?: { passed: number; total: number } } } | undefined,
+): string {
+	if (!verdictStr.startsWith("CLEAN")) return verdictStr;
+	const behaviouralPassed = scoreCard?.strengthBreakdown?.behavioural?.passed ?? 0;
+	if (behaviouralPassed > 0) return verdictStr;
+	return `${verdictStr} (existence-only — no assertion executed the feature)`;
+}
+
+/**
+ * Apply strength classification to a check result.
+ *
+ * Given the declared strength of an assertion and the command that was run, determines the
+ * effective strength and records a correction if needed. Never upgrades strength.
+ *
+ * @param result - The CheckResult to annotate in-place.
+ * @param declaredStrength - The strength declared in the assertion schema (may be undefined).
+ * @returns The effective strength.
+ */
+export function applyStrengthClassification(
+	result: CheckResult,
+	declaredStrength: AssertionStrength | undefined,
+): AssertionStrength | undefined {
+	if (declaredStrength === undefined) return undefined;
+
+	// code-review and non-bash assertions keep their declared strength
+	// (caller is responsible for not passing these for bash commands)
+	if (declaredStrength !== "behavioural") {
+		result.declaredStrength = declaredStrength;
+		result.effectiveStrength = declaredStrength;
+		return declaredStrength;
+	}
+
+	// For declared 'behavioural': check whether the command is filesystem-only
+	const classified = classifyCommandStrength(result.command);
+	result.declaredStrength = "behavioural";
+	if (classified === "existence") {
+		// Downgrade
+		result.effectiveStrength = "existence";
+		result.strengthCorrected = true;
+	} else {
+		// Stays behavioural
+		result.effectiveStrength = "behavioural";
+	}
+	return result.effectiveStrength;
 }

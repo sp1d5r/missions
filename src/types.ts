@@ -24,10 +24,27 @@ export type ValidationMethod =
 	| { type: "behavioral"; scenario: string; threshold?: number }
 	| { type: "code-review"; focus: string };
 
+/**
+ * Strength of an assertion — how strongly it proves the feature works.
+ *
+ * - "behavioural": the command actually EXECUTES the feature (calls the code, runs the binary).
+ * - "existence": the command only inspects the filesystem (test -f, ls, stat, find, grep, cat, etc.).
+ * - "review": a human or LLM reads the diff and judges it (code-review method).
+ *
+ * Optional — missing means unclassified. Harness will auto-correct declared 'behavioural'
+ * assertions whose command is purely filesystem-inspection to 'existence'.
+ */
+export type AssertionStrength = "behavioural" | "existence" | "review";
+
 export interface Assertion {
 	id: string;
 	statement: string;
 	method: ValidationMethod;
+	/**
+	 * How strongly this assertion proves the feature. Optional — plans without it still parse and run.
+	 * See AssertionStrength for semantics.
+	 */
+	strength?: AssertionStrength;
 	/** Filled in by validators. */
 	passed?: boolean;
 	evidence?: string;
@@ -77,6 +94,23 @@ export interface CheckResult {
 	exitCode: number;
 	passed: boolean;
 	output: string;
+	/**
+	 * Set by the strength classifier when a declared 'behavioural' assertion is downgraded
+	 * because its command is purely filesystem-inspection. Never set on upgrades (there are none).
+	 */
+	strengthCorrected?: boolean;
+	/** The strength declared in the assertion schema, before any classifier correction. */
+	declaredStrength?: AssertionStrength;
+	/** The effective strength after classifier correction. */
+	effectiveStrength?: AssertionStrength;
+}
+
+/** Per-strength breakdown of assertion counts. */
+export interface StrengthBreakdown {
+	behavioural: { passed: number; total: number };
+	existence: { passed: number; total: number };
+	review: { passed: number; total: number };
+	unclassified: { passed: number; total: number };
 }
 
 export interface ScoreCard {
@@ -85,6 +119,8 @@ export interface ScoreCard {
 	checks: CheckResult[];
 	bugs: BugFinding[];
 	costUsd: number;
+	/** Per-strength breakdown of assertions. Present when the plan has strength annotations. */
+	strengthBreakdown?: StrengthBreakdown;
 }
 
 export interface CommitRecord {

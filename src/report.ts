@@ -2,7 +2,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { contractMapSvg, mermaidSource, missionFlowSvg } from "./diagram.js";
 import { codename, esc, page, statStrip, tag, type Tone } from "./theme.js";
-import type { BugFinding, CommitRecord, Handoff, MilestoneRecord, MilestoneVerdict, MissionState, Plan, ScoreCard } from "./types.js";
+import type { BugFinding, CommitRecord, Handoff, MilestoneRecord, MilestoneVerdict, MissionState, Plan, ScoreCard, StrengthBreakdown } from "./types.js";
 
 const SEV_TONE: Record<string, Tone> = {
 	critical: "bad",
@@ -96,15 +96,49 @@ function milestonesSection(milestones: MilestoneRecord[]): string {
 	return milestones
 		.map((m) => {
 			const v = VERDICT_TAG[m.verdict];
-			return `<div style="margin:18px 0">
+			const bdRows = m.scoreCard.strengthBreakdown
+			? ([
+					["behavioural", m.scoreCard.strengthBreakdown.behavioural],
+					["existence", m.scoreCard.strengthBreakdown.existence],
+					["review", m.scoreCard.strengthBreakdown.review],
+					["unclassified", m.scoreCard.strengthBreakdown.unclassified],
+				] as const)
+				.filter(([, v]) => v.total > 0)
+				.map(([label, v]) => `<span class="faint mono">${label} ${v.passed}/${v.total}</span>`)
+				.join(" · ")
+			: "";
+		return `<div style="margin:18px 0">
       <h3>Milestone ${m.index} ${tag(v.tone, v.label)}
         <span class="faint mono">${m.scoreCard.assertionsPassed}/${m.scoreCard.assertionsTotal} assertions · ${m.scoreCard.bugs.length} bugs</span></h3>
+      ${bdRows ? `<div class="faint" style="margin-bottom:4px">${bdRows}</div>` : ""}
       ${m.assessment ? `<blockquote>${esc(m.assessment)}</blockquote>` : ""}
       ${m.correctionIds.length ? `<div class="faint">scoped corrections: ${esc(m.correctionIds.join(" "))}</div>` : ""}
       ${m.handoffs.map(handoffCard).join("")}
     </div>`;
 		})
 		.join("");
+}
+
+/** Renders the per-strength assertion breakdown panel. */
+function strengthBreakdownPanel(bd: StrengthBreakdown): string {
+	const rows = ([
+		["behavioural", bd.behavioural],
+		["existence", bd.existence],
+		["review", bd.review],
+		["unclassified", bd.unclassified],
+	] as const)
+		.filter(([, v]) => v.total > 0)
+		.map(([label, v]) => {
+			const tone: "ok" | "warn" | "bad" | "quiet" =
+				v.passed === v.total ? "ok" : v.passed === 0 ? "bad" : "warn";
+			return `<tr><td>${tag(tone, label)}</td><td class="mono">${v.passed}/${v.total}</td></tr>`;
+		})
+		.join("");
+	if (!rows) return "";
+	return `<div class="panel" style="margin-top:10px">
+	<div class="label">assertion strength breakdown</div>
+	<table style="margin-top:6px"><tbody>${rows}</tbody></table>
+</div>`;
 }
 
 /** Renders the glanceable review page. Review this, not the code. */
@@ -137,6 +171,8 @@ export function generateReport(args: {
 		{ value: String(state.commits.length), label: "commits" },
 		{ value: `$${state.costUsd.toFixed(2)}`, label: "spent" },
 	])}
+
+  ${scoreCard?.strengthBreakdown ? strengthBreakdownPanel(scoreCard.strengthBreakdown) : ""}
 
   ${
 		unruled.length || leftUndone.length
