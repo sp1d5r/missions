@@ -126,6 +126,35 @@ export function checkPlan(plan: Plan): Violation[] {
 // At the ledger: the milestone boundary.
 // ---------------------------------------------------------------------------
 
+/**
+ * The contract may only ever get stricter.
+ *
+ * Unfreezing the contract at a boundary is what lets a mission assert behaviour once an interface
+ * exists — but the same door lets an orchestrator quietly drop the assertion it cannot satisfy.
+ * So every assertion present before must still be present, with the same statement and the same
+ * method. Adding is free; removing, rewording and re-methoding are not.
+ */
+export function checkContractRatchet(before: Assertion[], after: Assertion[]): Violation[] {
+	const v: Violation[] = [];
+	const push = (invariant: string, severity: Severity, detail: string) => v.push({ invariant, severity, detail });
+	const byId = new Map(after.map((a) => [a.id, a]));
+
+	for (const old of before) {
+		const now = byId.get(old.id);
+		if (!now) {
+			push("contract.no-deletion", "block", `assertion ${old.id} was dropped from the contract: ${snip(old.statement)}`);
+			continue;
+		}
+		if (now.statement !== old.statement) {
+			push("contract.no-reword", "block", `assertion ${old.id} was reworded — it must mean today what it meant at plan time`);
+		}
+		if (JSON.stringify(now.method) !== JSON.stringify(old.method)) {
+			push("contract.no-remethod", "block", `assertion ${old.id} had its method changed — a check that moves is not a check`);
+		}
+	}
+	return v;
+}
+
 export interface BoundaryFacts {
 	/** The full contract, after validators have marked it. */
 	assertions: Assertion[];

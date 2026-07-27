@@ -159,9 +159,36 @@ Your job:
    worker with clean context. Target the failing assertions, the blocking bugs, and the issues you marked
    "addressed".
 
+4. STRENGTHEN THE CONTRACT. This is the step that matters most, and it is only possible now.
+
+   The contract was written before any code existed, so it could only assert things that were
+   knowable then — that a file would exist, that a flag would be accepted. Now the code IS here.
+   You can read the diff, see the real interface, and write assertions that actually execute it.
+
+   Look at what the work CLAIMS to do and ask: if this were subtly broken, which of these
+   assertions would still pass? Every one that would is not protecting anything. Then write the
+   assertion that would catch it — a command that runs the new code and observes an outcome.
+
+   Rules for new assertions:
+   - Only ADD. You may never delete, weaken, or reword an existing assertion, and you may never
+     lower a strength. The contract ratchets in one direction.
+   - Each must be BEHAVIOURAL where the interface now permits it: run the entry point, call the
+     function, execute the command. A test -f, an ls or a grep proves authorship, not behaviour.
+   - Each must be justified by the GOAL or the RFC. Do not invent new requirements — you are
+     making the existing ones checkable, not expanding scope.
+   - Each must be able to FAIL. If you cannot describe an input that would make it fail, it is
+     decoration.
+   - At most 3 per boundary. A contract that grows without limit never finishes.
+   - If the work is genuinely unprovable by command at this point, say so in "assessment" rather
+     than padding with weak assertions.
+
+   You MUST add at least one behavioural assertion when all of these hold: code was committed this
+   milestone, no behavioural assertion has passed yet, and an interface now exists to call. In that
+   situation the contract has proven nothing about behaviour, and saying "passed" would be a guess.
+
 Rules for corrections:
 - A correction must name what it resolves in "addresses" — the failing assertion ids, bug summaries, or issue text.
-- Reuse the EXISTING assertion ids in "assertionIds". Do not invent new assertions; the contract is fixed.
+- Reuse the EXISTING assertion ids in "assertionIds" when a correction targets one.
 - Do not re-do work that passed. Only fix what is broken.
 - If the work is genuinely done — every assertion passed, no blocking bugs, every issue ruled — return an
   empty "corrections" array and verdict "passed".
@@ -178,6 +205,11 @@ Output ONLY a JSON object, no prose:
     { "summary": "...", "disposition": "deferred", "evidenceAssertionId": "a3", "note": "a3 exercises this path end to end" },
     { "summary": "...", "disposition": "deferred", "outOfScope": true, "note": "the RFC explicitly excludes this" },
     { "summary": "must match the issue summary verbatim", "disposition": "deferred", "note": "why it is safe to leave" }
+  ],
+  "newAssertions": [
+    { "id": "a7", "statement": "observable claim that must hold", "strength": "behavioural",
+      "justification": "which part of the goal/RFC this makes checkable",
+      "method": { "type": "bash-command", "command": "node dist/cli.js view $ID --json | jq -e '.timeline|length>0'", "expectedExitCode": 0 } }
   ],
   "corrections": [
     { "id": "c1", "title": "short", "description": "what to change and where, precisely",
@@ -203,6 +235,8 @@ export interface MilestoneReview {
 	verdict: "passed" | "needs-corrections" | "stalled";
 	issueRulings: CorrectionRuling[];
 	corrections: Feature[];
+	/** Assertions added at this boundary, now that an interface exists to assert against. */
+	newAssertions: Assertion[];
 	costUsd: number;
 }
 
@@ -278,6 +312,7 @@ Assess, rule on the issues, and scope corrections now. At most ${config.maxFeatu
 		verdict?: string;
 		issueRulings?: unknown;
 		corrections?: unknown;
+		newAssertions?: unknown;
 	}>(text);
 
 	if (!parsed) {
@@ -287,6 +322,7 @@ Assess, rule on the issues, and scope corrections now. At most ${config.maxFeatu
 			verdict: "stalled",
 			issueRulings: [],
 			corrections: [],
+			newAssertions: [],
 			costUsd,
 		};
 	}
@@ -338,6 +374,24 @@ Assess, rule on the issues, and scope corrections now. At most ${config.maxFeatu
 		];
 	});
 
+	// New assertions are capped and coerced. An id that collides with an existing one is dropped
+	// rather than allowed to overwrite it — the ratchet must not be defeated by reusing an id.
+	const existingIds = new Set(assertions.map((a) => a.id));
+	const rawNew = Array.isArray(parsed.newAssertions) ? parsed.newAssertions : [];
+	const newAssertions: Assertion[] = rawNew
+		.map((raw) => raw as Partial<Assertion> & { justification?: string })
+		.filter((a) => typeof a.id === "string" && a.id.trim() && !existingIds.has(a.id))
+		.filter((a) => a.method && typeof a.statement === "string" && a.statement.trim())
+		.slice(0, 3)
+		.map((a) => ({
+			id: a.id as string,
+			statement: a.statement as string,
+			method: a.method as Assertion["method"],
+			strength: a.strength,
+			addedAtMilestone: milestone + 1,
+			justification: typeof a.justification === "string" ? a.justification : undefined,
+		}));
+
 	const verdict = parsed.verdict === "passed" || parsed.verdict === "stalled" ? parsed.verdict : "needs-corrections";
 
 	return {
@@ -346,6 +400,7 @@ Assess, rule on the issues, and scope corrections now. At most ${config.maxFeatu
 		verdict: verdict === "needs-corrections" && corrections.length === 0 ? "stalled" : verdict,
 		issueRulings,
 		corrections,
+		newAssertions,
 		costUsd,
 	};
 }

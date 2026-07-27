@@ -45,6 +45,10 @@ export interface Assertion {
 	 * See AssertionStrength for semantics.
 	 */
 	strength?: AssertionStrength;
+	/** Milestone this assertion was added at. Absent = written at plan time, before code existed. */
+	addedAtMilestone?: number;
+	/** For boundary-added assertions: which part of the goal/RFC this makes checkable. */
+	justification?: string;
 	/** Filled in by validators. */
 	passed?: boolean;
 	evidence?: string;

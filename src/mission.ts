@@ -3,7 +3,7 @@ import { applyEnvOverrides, bootstrapWorktree } from "./bootstrap.js";
 import { provisionDbBranch } from "./db-branch.js";
 import { resolveMissionEnv } from "./env.js";
 import { addWorktree, commitAll, diffAgainst, ensureBranch, headSha, isGitRepo } from "./git.js";
-import { blocking, checkBoundary, checkPlan, formatViolations, warnings } from "./invariants.js";
+import { blocking, checkBoundary, checkContractRatchet, checkPlan, formatViolations, warnings } from "./invariants.js";
 import { humanBytes, reclaimWorktree } from "./lifecycle.js";
 import { type CorrectionRuling, planMission, scopeCorrections } from "./orchestrator.js";
 import { writeActive, repoName } from "./registry.js";
@@ -367,6 +367,28 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 
 			// Apply the rulings back onto the issues so the report shows what happened to each.
 			applyRulings(handoffs, review.issueRulings);
+
+			// Strengthen the contract. This is only possible now: at plan time there was no
+			// interface to assert against, so the contract could only claim a file would exist.
+			// The code is here, so the boundary can add assertions that actually execute it — and
+			// they are validated from the NEXT milestone on, against work that must then satisfy
+			// them. The ratchet check runs first: adding is free, removing or rewording is not.
+			if (review.newAssertions.length) {
+				const before = plan.contract.assertions.map((a) => ({ ...a }));
+				const after = [...plan.contract.assertions, ...review.newAssertions];
+				const ratchet = blocking(checkContractRatchet(before, after));
+				if (ratchet.length) {
+					emit(`  ⚠ contract additions REJECTED — ${formatViolations(ratchet)}`);
+				} else {
+					plan.contract.assertions = after;
+					store.state.plan = plan;
+					for (const a of review.newAssertions) {
+						emit(`  + assertion ${a.id} [${a.strength ?? "unclassified"}] ${a.statement.slice(0, 90)}`);
+						if (a.justification) emit(`      because: ${a.justification.slice(0, 110)}`);
+					}
+					store.save();
+				}
+			}
 
 			// Cap BEFORE checking, so the invariants see what will actually be dispatched rather
 			// than what was proposed. Corrections past the cap are dropped, and any issue that was
