@@ -30,7 +30,14 @@ function cleanup() {
 	try {
 		execFileSync("git", ["branch", "-D", BRANCH], { cwd: REPO, stdio: "ignore" });
 	} catch {}
-	rmSync(WT, { recursive: true, force: true });
+	// node_modules is now a copy-on-write clone rather than a symlink, so teardown deletes a real
+	// multi-thousand-file tree. Node's rimraf fails ENOTEMPTY partway through these on APFS even
+	// with retries; `rm -rf` handles them natively, so use it rather than fight the runtime.
+	try {
+		execFileSync("rm", ["-rf", WT], { stdio: "ignore" });
+	} catch {
+		rmSync(WT, { recursive: true, force: true });
+	}
 }
 
 cleanup();
@@ -45,7 +52,10 @@ try {
 	check("bare worktree has no .env", !existsSync(join(WT, ".env")));
 	check("bare worktree has no backend/.venv", !existsSync(join(WT, "backend/.venv")));
 
-	const boot = bootstrapWorktree({ targetCwd: REPO, workCwd: WT, spec });
+	// MUST await: bootstrapWorktree became async when cloning went concurrent. Without this the
+	// clones keep running in the background while the script races on to teardown, which deletes
+	// a tree mid-copy and surfaces as a confusing ENOTEMPTY rather than "you forgot an await".
+	const boot = await bootstrapWorktree({ targetCwd: REPO, workCwd: WT, spec });
 	console.log(`\n  bootstrap notes:\n${boot.notes.map((n) => `    - ${n}`).join("\n")}\n`);
 
 	// 1. Env files land as real copies.

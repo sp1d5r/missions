@@ -80,6 +80,8 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 		const spec = target.bootstrapSpec(config.targetCwd);
 		let workCwd = config.targetCwd;
 		let sourceRoots: string[] = [];
+		// Dependency bin dirs for PATH — without these a bare `python` is the machine's, not this tree's.
+		let binDirs: string[] = [];
 		// Paths the harness put here. Kept out of every commit — see commitAll.
 		let gitExcludes: string[] = [];
 		if (useWorktree) {
@@ -92,13 +94,16 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 			// the tree needs to actually RUN — env files, venvs, node_modules — is placed here.
 			const boot = await bootstrapWorktree({ targetCwd: config.targetCwd, workCwd, spec });
 			sourceRoots = boot.sourceRoots;
+			binDirs = boot.binDirs;
 			gitExcludes = boot.gitExcludes;
 			for (const note of boot.notes) emit(`  bootstrap: ${note}`);
 		} else {
 			// Working in the main checkout: env and deps are already there, so only the source
 			// roots matter. Nothing was placed by us, so nothing needs excluding from commits.
 			ensureBranch(config.targetCwd, branch);
-			sourceRoots = (await bootstrapWorktree({ targetCwd: config.targetCwd, workCwd, spec })).sourceRoots;
+			const boot = await bootstrapWorktree({ targetCwd: config.targetCwd, workCwd, spec });
+			sourceRoots = boot.sourceRoots;
+			binDirs = boot.binDirs;
 			emit(`branch ${branch} @ ${baseSha.slice(0, 8)} in ${config.targetCwd}`);
 		}
 		store.save();
@@ -111,6 +116,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 			workCwd,
 			missionId: store.state.id,
 			sourceRoots,
+			binDirs,
 		});
 
 		// 1. Plan — the validation contract is written here, before any code exists.
@@ -155,6 +161,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 				workCwd,
 				missionId: store.state.id,
 				sourceRoots,
+				binDirs,
 				overrides: dbOutcome.branch.overrides,
 			});
 			dbTeardown = dbOutcome.branch.teardown;

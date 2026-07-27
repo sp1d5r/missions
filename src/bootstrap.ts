@@ -17,6 +17,15 @@ export interface BootstrapResult {
 	/** Absolute, worktree-rooted source roots for PYTHONPATH. */
 	sourceRoots: string[];
 	/**
+	 * Absolute `bin` dirs belonging to the tree's own dependencies, for PATH.
+	 *
+	 * Discovered rather than declared: any linked or cloned dependency dir that has a `bin`
+	 * (a venv's `.venv/bin`, a `node_modules/.bin`) contributes one. Without these a bare
+	 * `python` in a worker command or a validator assertion resolves to whatever the daemon's
+	 * shell had first, which on this machine is an unrelated anaconda install.
+	 */
+	binDirs: string[];
+	/**
 	 * Everything the harness placed here, repo-relative, to be kept out of commits.
 	 * A repo's .gitignore is not enough: directory-only patterns (`node_modules/`) do not
 	 * match a symlink, so these would otherwise be staged by `git add -A`.
@@ -41,7 +50,7 @@ export interface BootstrapWorktreeOptions {
  */
 export async function bootstrapWorktree(options: BootstrapWorktreeOptions): Promise<BootstrapResult> {
 	const { targetCwd, workCwd, spec } = options;
-	const result: BootstrapResult = { envFiles: [], linkedDirs: [], clonedDirs: [], sourceRoots: [], gitExcludes: [], notes: [] };
+	const result: BootstrapResult = { envFiles: [], linkedDirs: [], clonedDirs: [], sourceRoots: [], binDirs: [], gitExcludes: [], notes: [] };
 
 	for (const rel of spec.envFiles) {
 		const from = join(targetCwd, rel);
@@ -103,6 +112,18 @@ export async function bootstrapWorktree(options: BootstrapWorktreeOptions): Prom
 
 	result.sourceRoots = spec.sourceRoots.map((rel) => resolve(workCwd, rel)).filter((p) => existsSync(p));
 	if (result.sourceRoots.length) result.notes.push(`PYTHONPATH rooted in worktree (${result.sourceRoots.length} roots)`);
+
+	// Order matters: earlier dirs win on PATH, and spec order is the target's own priority
+	// (for nadine, backend/.venv first — it is the fullest environment).
+	for (const rel of [...result.linkedDirs, ...result.clonedDirs]) {
+		const bin = resolve(workCwd, rel, "bin");
+		if (existsSync(bin) && !result.binDirs.includes(bin)) result.binDirs.push(bin);
+		// node_modules keeps its executables in `.bin`, not `bin`.
+		const dotBin = resolve(workCwd, rel, ".bin");
+		if (existsSync(dotBin) && !result.binDirs.includes(dotBin)) result.binDirs.push(dotBin);
+	}
+	if (result.binDirs.length) result.notes.push(`PATH: ${result.binDirs.length} dependency bin dir(s) prepended`);
+	else result.notes.push("no dependency bin dirs found — a bare `python` will be the machine's, not this tree's");
 
 	result.gitExcludes = [...result.envFiles, ...result.linkedDirs, ...result.clonedDirs];
 	return result;

@@ -60,6 +60,16 @@ export interface ResolveMissionEnvOptions {
 	missionId: string;
 	/** Source roots that must beat installed packages. Joined into PYTHONPATH, worktree-rooted. */
 	sourceRoots: string[];
+	/**
+	 * Absolute `bin` dirs from the tree's own dependencies, prepended to PATH.
+	 *
+	 * PYTHONPATH alone is not enough: it says where to find modules, not which interpreter
+	 * runs. Measured on the first real mission — `which python` in a worktree resolved to
+	 * /opt/anaconda3/bin/python, an unrelated interpreter with none of the repo's deps, so two
+	 * validator assertions failed for reasons that had nothing to do with the work under test.
+	 * The worker survived only because it happened to reach for `pdm run`.
+	 */
+	binDirs?: string[];
 	/** Env vars the mission overrides (e.g. a branched database). Win over the repo's env files. */
 	overrides?: Record<string, string>;
 	/** Base env to build on. Defaults to the daemon's process.env. */
@@ -73,12 +83,19 @@ export interface ResolveMissionEnvOptions {
  * decides WHICH tree the command reads is set here rather than inherited.
  */
 export function resolveMissionEnv(options: ResolveMissionEnvOptions): NodeJS.ProcessEnv {
-	const { targetCwd, workCwd, missionId, sourceRoots, overrides, base } = options;
+	const { targetCwd, workCwd, missionId, sourceRoots, binDirs, overrides, base } = options;
 	const env: NodeJS.ProcessEnv = { ...(base ?? process.env) };
 
 	if (sourceRoots.length) {
 		// Prepend, so the worktree wins over both site-packages and any ambient PYTHONPATH.
 		env.PYTHONPATH = [...sourceRoots, env.PYTHONPATH].filter(Boolean).join(":");
+	}
+
+	if (binDirs?.length) {
+		// Prepend for the same reason as PYTHONPATH: a bare `python`, `pytest` or `ruff` must be
+		// the tree's own, not whatever the daemon's shell happened to have first on PATH.
+		const pathKey = Object.keys(env).find((k) => k.toLowerCase() === "path") ?? "PATH";
+		env[pathKey] = [...binDirs, env[pathKey]].filter(Boolean).join(":");
 	}
 
 	// Markers, so a command (or a human reading a log) can tell which tree it is in.
