@@ -3,7 +3,7 @@
 Status: **shipped and verified**. Written 2026-07-27.
 
 Scope: making `missions` safe to run long-running agents in parallel against a real repo.
-Stage 2 (agent-friendliness — `AGENTS.md`) is **not started**; see the end of this doc.
+Stage 2 (agent-friendliness — `AGENTS.md`) is **also done**; see the end of this doc.
 
 ---
 
@@ -188,26 +188,38 @@ fail loudly; commits fail silently.
 
 ---
 
-## Stage 2 — not started
+## Stage 2 — done (2026-07-27)
 
-The codebase is not agent-friendly, and the order matters:
+Workers were opening on a 2,846-file monorepo knowing only their one feature. `runWorker` loaded no
+context file at all, and the root `AGENTS.md` that existed was a Cursor Cloud artifact — `/workspace`
+paths, pointing at the Cursor-only `generate_env.sh`, naming Firebase as *the* auth system, and
+describing five services while saying nothing about `naomi/`, `naomi-mcp/`, `agent_runner/`,
+`naomi-web/` or `pi-extension-e2b-hands/`. An agent that trusted it would build against the
+meditation app.
 
-1. **Rewrite nadine's root `AGENTS.md`.** The current one is a Cursor Cloud artifact: `/workspace`
-   paths, points at the Cursor-only `generate_env.sh`, documents **Firebase** auth (it is Clerk
-   now), and describes only backend/website/queue/voice/shared. It says nothing about `naomi/`,
-   `naomi-mcp/`, `agent_runner/`, `pi-extension-e2b-hands/`, `naomi-web/`, `infra/` — the entire
-   surface where current work happens. An agent that trusts it builds against the meditation app.
-2. **Make the harness read it.** `runWorker` never loads any context file — grep `~/missions/src`
-   for `AGENTS|loadProjectContextFiles`: zero hits. A worker starts with ~20 lines of generic
-   prompt against a 2,846-file monorepo. Use pi's exported `loadProjectContextFiles({cwd})`.
-   Without this step the docs are decoration as far as missions is concerned.
-3. **Then** per-directory `AGENTS.md`, only where a wrong assumption is expensive: `naomi/`,
-   `agent_runner/`, `backend/`, `shared/`, `naomi-web/`, `infra/`. ≤40 lines each.
+**Both halves are now in place:**
 
-Note a mechanic that cuts against doing (3) first: pi's `loadProjectContextFiles` walks the
-global agent dir plus **cwd's ancestors only**. There is no nested/on-demand loading, so an
-`AGENTS.md` in `naomi/` is invisible when cwd is the repo root. Claude Code loads nested
-`CLAUDE.md`; pi does not.
+1. nadine's root `AGENTS.md` rewritten (nadine `abc0e1b4`, extended `5816846f`) — 207 lines / 11.9KB.
+   Naomi-first, the virtual-hands runtime with the in-box path marked dead, the two-environment
+   doctrine, the `PYTHONPATH`-beats-`.pth` import rule, provider routing with BytePlus excluded, the
+   Clerk/Firebase split *by product*, the standing rules, and a per-area trap list. Every path and
+   command in it was verified to exist before committing.
+2. `worker.ts` loads it via pi's `loadProjectContextFiles` (missions `957d9b5`), so the file governing
+   a worker is the same one governing an interactive pi session in that directory.
 
-Also unused today: `.agents/skills/` and `.claude/skills/` (both populated), and
-`.cursor/rules/*.mdc` (9 files of real frontend convention that only Cursor reads).
+**The filter in `repoContext` is load-bearing, not tidiness.** Mission worktrees live at
+`<repo>/.missions/worktrees/<id>`, so ancestor discovery also finds the **parent checkout's**
+`AGENTS.md` — a different tree, at a different commit, possibly with uncommitted edits. Measured from a
+real worktree: discovery returned 2 files, and before filtering a worker would have received both the
+new rules and the stale Cursor-era ones and been left to choose. After filtering to this-tree-plus-global:
+1 file, 11,840 chars.
+
+**Per-directory `AGENTS.md` was deliberately NOT done.** pi walks the global agent dir plus **cwd's
+ancestors only** — no nested or on-demand loading — so a file in `naomi/` is invisible from the repo
+root, which is where every worker sits. Six such files would be six files nothing reads. The knowledge
+went into the root file's per-area section instead. Revisit only if the root file gets too crowded, and
+if so the fix is ~20 lines in `repoContext` to also collect `AGENTS.md` from the directories a feature
+touches.
+
+Still unused: `.agents/skills/` and `.claude/skills/` (both populated), and `.cursor/rules/*.mdc`
+(9 files of real frontend convention that only Cursor reads — the root file now points at them).
