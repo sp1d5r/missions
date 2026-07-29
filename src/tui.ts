@@ -89,6 +89,22 @@ function pad(s: string, w: number): string {
 	return t.padEnd(w);
 }
 
+/**
+ * Format the NEEDS YOU supplemental row for a review item.
+ *
+ * Pure function — no chalk, no TTY — so it can be tested without a terminal.
+ * Returns the plain-text content of the row, or an empty string when the
+ * record has no needs sentence (older records may lack the field).
+ *
+ * @param needs  The `needs` sentence from the ActiveRecord (may be undefined).
+ * @param width  The available column width for the content.
+ */
+export function formatNeedsRow(needs: string | undefined, width: number): string {
+	if (!needs) return "";
+	const maxW = Math.max(20, width);
+	return needs.length > maxW ? `${needs.slice(0, maxW - 1)}…` : needs;
+}
+
 function age(iso: string, now: number): string {
 	const secs = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
 	if (secs < 60) return `${secs}s`;
@@ -179,6 +195,11 @@ export function renderFrame(s: RenderState): string {
 			const status = pad(verdictLabel(r), cStatus);
 			const cells = `${status}  ${pad(milestoneLabel(r), cMile)}  ${pad(r.repoName, cRepo)}  ${goalCell}  ${pad(money(r.costUsd), cCost)}  ${pad(age(r.updatedAt, now), cAge)}`;
 			lines.push(marker + (sel ? chalk.inverse(cells) : outcomeColor(r)(cells.slice(0, cStatus)) + cells.slice(cStatus)));
+			// Show the needs sentence under each NEEDS YOU row, wrapped/truncated to fit.
+			if (item.kind === "review") {
+				const needsText = formatNeedsRow(r.needs, W - 8);
+				if (needsText) lines.push(chalk.dim(`    ↳ ${needsText}`));
+			}
 		}
 
 		if (sel) lines.push(chalk.dim(`      ${actionsFor(item)}`));
