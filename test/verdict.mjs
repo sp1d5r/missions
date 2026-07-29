@@ -60,6 +60,19 @@ t(
 	"CLEAN (1 of 3 assertions executed the feature)",
 );
 
+// 2-of-6 using the real nested strengthBreakdown shape (2 behavioural + 3 existence + 1 review)
+t(
+	"partial-behavioural: 2-of-6 with full nested shape → ratio wording",
+	annotateVerdict("CLEAN", {
+		strengthBreakdown: {
+			behavioural: { passed: 2, total: 2 },
+			existence:   { passed: 3, total: 3 },
+			review:      { passed: 1, total: 1 },
+		},
+	}),
+	"CLEAN (2 of 6 assertions executed the feature)",
+);
+
 // ---- all-behavioural → bare CLEAN ----
 
 t(

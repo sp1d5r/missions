@@ -148,16 +148,22 @@ export function classifyCommandStrength(command: string): AssertionStrength {
  */
 export function annotateVerdict(
 	verdictStr: string,
-	scoreCard: { strengthBreakdown?: { behavioural?: { passed: number; total: number } } } | undefined,
+	scoreCard: { strengthBreakdown?: { behavioural?: { passed: number; total: number }; existence?: { passed: number; total: number }; review?: { passed: number; total: number }; unclassified?: { passed: number; total: number } } } | undefined,
 ): string {
 	if (!verdictStr.startsWith("CLEAN")) return verdictStr;
-	const behaviouralPassed = scoreCard?.strengthBreakdown?.behavioural?.passed ?? 0;
-	const behaviouralTotal = scoreCard?.strengthBreakdown?.behavioural?.total ?? 0;
+	const breakdown = scoreCard?.strengthBreakdown;
+	const behaviouralPassed = breakdown?.behavioural?.passed ?? 0;
+	// Sum total across every strength bucket to get the contract total
+	const contractTotal =
+		(breakdown?.behavioural?.total ?? 0) +
+		(breakdown?.existence?.total ?? 0) +
+		(breakdown?.review?.total ?? 0) +
+		(breakdown?.unclassified?.total ?? 0);
 	if (behaviouralPassed === 0) {
 		return `${verdictStr} (existence-only — no assertion executed the feature)`;
 	}
-	if (behaviouralPassed < behaviouralTotal) {
-		return `${verdictStr} (${behaviouralPassed} of ${behaviouralTotal} assertions executed the feature)`;
+	if (behaviouralPassed < contractTotal) {
+		return `${verdictStr} (${behaviouralPassed} of ${contractTotal} assertions executed the feature)`;
 	}
 	return verdictStr;
 }
