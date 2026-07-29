@@ -139,6 +139,7 @@ const EVENT_COLOR: Record<string, (s: string) => string> = {
 	milestone_verdict: chalk.magenta,
 	lifecycle: chalk.green,
 	error: chalk.red,
+	image: chalk.blue,
 };
 
 const EVENT_SYMBOL: Record<string, string> = {
@@ -148,6 +149,7 @@ const EVENT_SYMBOL: Record<string, string> = {
 	milestone_verdict: "◉",
 	lifecycle: "▸",
 	error: "✗",
+	image: "🖼",
 };
 
 function renderTimeline(events: MissionEvent[], state: MissionState, w: number, h: number): string[] {
@@ -179,7 +181,9 @@ function renderTimeline(events: MissionEvent[], state: MissionState, w: number, 
 			const color = EVENT_COLOR[ev.kind] ?? chalk.white;
 			const sym = EVENT_SYMBOL[ev.kind] ?? "·";
 			const time = ev.at.slice(11, 19); // HH:MM:SS
-			const label = truncVis(ev.label, w - 14);
+			// Image events get a bracketed prefix as a terminal fallback (no inline rendering).
+			const rawLabel = ev.kind === "image" ? `[image] ${ev.label}` : ev.label;
+			const label = truncVis(rawLabel, w - 14);
 			const row = color(`  ${sym} ${chalk.dim(time)} ${label}`);
 			lines.push(row);
 			if (ev.detail) {

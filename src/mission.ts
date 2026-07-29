@@ -186,6 +186,18 @@ async function runMilestoneLoop(ctx: MilestoneLoopContext): Promise<{ verdict: M
 					if (e.type === "tool") {
 						touch(`  ${feature.id} → ${e.toolName}`);
 						onEvent?.({ type: "log", message: `  ${feature.id} → ${e.toolName}` });
+					} else if (e.type === "image") {
+						// Store the image on disk (content-addressed, idempotent) then append a
+						// structured event so the timeline and web UI can render it.
+						try {
+							const stored = store.attachImage(e.data, e.mimeType);
+							store.appendEvent("image", `image from ${e.toolName}`, undefined, {
+								seat: "eng",
+								image: { path: stored.path, mimeType: e.mimeType, bytes: stored.bytes },
+							});
+						} catch {
+							// Storage failure is non-fatal — the mission continues.
+						}
 					}
 				},
 			});

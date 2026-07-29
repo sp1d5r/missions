@@ -91,7 +91,12 @@ export interface RunWorkerOptions {
 	 * fan-out entirely — a worker with no scouts behaves exactly as it did before.
 	 */
 	scouts?: AgentSpec[];
-	onProgress?: (e: { type: "tool"; toolName: string } | { type: "cost"; costUsd: number }) => void;
+	onProgress?: (
+		e:
+			| { type: "tool"; toolName: string }
+			| { type: "cost"; costUsd: number }
+			| { type: "image"; data: Buffer; mimeType: string; toolName: string },
+	) => void;
 }
 
 export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult> {
@@ -175,9 +180,29 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult
 			}
 		} else if (event.type === "tool_execution_end") {
 			const cmd = inFlight.get(event.toolCallId);
-			if (cmd === undefined) return;
+			if (cmd === undefined) {
+				// Not a bash command — still scan for image parts in the result.
+				try {
+					const imageParts = extractImageParts(event.result, event.toolName ?? "");
+					for (const img of imageParts) {
+						onProgress?.({ type: "image", data: img.data, mimeType: img.mimeType, toolName: img.toolName });
+					}
+				} catch {
+					// Malformed result — tolerate silently.
+				}
+				return;
+			}
 			inFlight.delete(event.toolCallId);
 			commands.push({ command: cmd, exitCode: exitCodeOf(event.result, event.isError) });
+			// Also scan bash results for embedded image parts (unusual but supported).
+			try {
+				const imageParts = extractImageParts(event.result, event.toolName ?? "");
+				for (const img of imageParts) {
+					onProgress?.({ type: "image", data: img.data, mimeType: img.mimeType, toolName: img.toolName });
+				}
+			} catch {
+				// Malformed result — tolerate silently.
+			}
 		}
 	});
 
@@ -339,6 +364,43 @@ function parseHandoff(finalText: string): { prose: string; handoff: RawHandoff |
 		return { prose: finalText.replace(/```[\s\S]*?```/g, "").trim(), handoff: loose };
 	}
 	return { prose: finalText.trim(), handoff: null };
+}
+
+/**
+ * Scan a tool result for image content parts (base64-encoded images embedded in tool responses).
+ * Tolerates malformed input: any part that cannot be decoded is silently skipped.
+ */
+export function extractImageParts(result: unknown, toolName: string): Array<{ data: Buffer; mimeType: string; toolName: string }> {
+	const out: Array<{ data: Buffer; mimeType: string; toolName: string }> = [];
+	if (!result || typeof result !== "object") return out;
+	// Tool results may be an array of content parts or an object with a `content` array.
+	const content: unknown[] = Array.isArray(result)
+		? result
+		: Array.isArray((result as { content?: unknown }).content)
+			? ((result as { content: unknown[] }).content)
+			: [];
+	for (const part of content) {
+		try {
+			if (!part || typeof part !== "object") continue;
+			const p = part as { type?: unknown; source?: { type?: unknown; media_type?: unknown; data?: unknown }; data?: unknown; mimeType?: unknown; media_type?: unknown };
+			if (p.type !== "image") continue;
+			// Anthropic-style: { type: "image", source: { type: "base64", media_type, data } }
+			if (p.source?.type === "base64" && typeof p.source.data === "string" && typeof p.source.media_type === "string") {
+				const data = Buffer.from(p.source.data, "base64");
+				out.push({ data, mimeType: p.source.media_type, toolName });
+				continue;
+			}
+			// OpenAI / generic: { type: "image", data: "<base64>", mimeType: "image/png" }
+			if (typeof p.data === "string" && typeof (p.mimeType ?? p.media_type) === "string") {
+				const mime = (p.mimeType ?? p.media_type) as string;
+				const data = Buffer.from(p.data, "base64");
+				out.push({ data, mimeType: mime, toolName });
+			}
+		} catch {
+			// Skip malformed parts without throwing.
+		}
+	}
+	return out;
 }
 
 /** Recover a bash exit code from a tool result. Non-zero exits surface as an error with a marker. */
