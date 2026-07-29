@@ -9,10 +9,12 @@ results. Summary of per-head decisions:
 
 | Head | Phase 1 decision |
 |---|---|
-| `confidence` | **Build.** 4/4 recall on labelled known-bad; 13.3% flag rate on 30 real fixtures. Proceed to economics spike. |
-| `naive` | **Do not build.** 36.7% real flag rate with lower recall (3/4) than `confidence`. Dominated. |
-| `assumption` | **Hold.** False positive on `20-49/f2-m1` reveals no edit-ordering awareness; unresolvable without ordering context in the prompt. |
-| `direction` | **Hold.** Zero real flags and 2/4 labelled recall — needs a drift corpus with known-bad direction cases before go/no-go. |
+| `confidence` | **Build.** 4/4 recall on labelled known-bad; 22.6% flag rate on 31 real fixtures. Proceed to economics spike. Real-corpus adjudication pass recommended before autonomous surfacing. |
+| `naive` | **Do not build.** 51.6% real flag rate with lower recall (3/4) than `confidence`. Dominated. |
+| `assumption` | **Hold.** Only 2 real flags and 2/4 labelled recall; needs more data and clearer scope before wiring. |
+| `direction` | **Hold.** 1 real flag and 2/4 labelled recall — needs a drift corpus with known-bad direction cases before go/no-go. |
+
+*Numbers corrected after a fixtures bug fix (`feature.assertions` → `s.plan?.contract?.assertions`); see `spike/heads/README.md` for full findings including before/after numbers.*
 
 Proposes bringing [pi-hydra](https://github.com/pandysp/pi-hydra)'s idea — autonomous observer "heads" that
 watch a running agent through prompt-cache replay — into `missions`, but pointed at a specific job: telling
