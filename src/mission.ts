@@ -360,36 +360,46 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 				// so a mission can no longer score itself against a tree it never touched.
 				foreignRoot: config.targetCwd,
 				onProgress: (msg) => emit(`  validator: ${msg}`),
+				// Pending classification: assertions whose owning feature has not yet been
+				// dispatched are excluded from the failing set but still block CLEAN.
+				dispatchedFeatureIds: store.state.features.map((f) => f.id),
 			});
 			store.state.scoreCard = scoreCard;
 			store.state.costUsd += scoreCard.costUsd;
 			store.save();
-			emit(`validated: ${scoreCard.assertionsPassed}/${scoreCard.assertionsTotal} assertions, ${scoreCard.bugs.length} bug(s)`);
+			const pendingCount = scoreCard.pendingAssertionIds?.length ?? 0;
+			emit(`validated: ${scoreCard.assertionsPassed}/${scoreCard.assertionsTotal} assertions${pendingCount > 0 ? `, ${pendingCount} pending` : ""}, ${scoreCard.bugs.length} bug(s)`);
 			// The summary and its per-assertion results share a thread, so the timeline shows one
 			// line with "12 replies" rather than thirteen lines of equal weight. A mission with
 			// forty assertions was otherwise a wall of ✓ that buried the verdict above it.
 			const vThread = `validation-m${m}`;
 			store.appendEvent(
 				"validation_result",
-				`validated: ${scoreCard.assertionsPassed}/${scoreCard.assertionsTotal} assertions passed`,
+				`validated: ${scoreCard.assertionsPassed}/${scoreCard.assertionsTotal} assertions passed${pendingCount > 0 ? `, ${pendingCount} pending` : ""}`,
 				scoreCard.bugs.length > 0 ? `${scoreCard.bugs.length} bug(s) found` : "no bugs found",
 				{ seat: "qa", thread: vThread },
 			);
 			// Emit per-assertion pass/fail events
 			for (const a of plan.contract.assertions) {
+				const label = a.pending ? "⏳" : a.passed ? "✓" : "✗";
 				store.appendEvent(
 					"validation_result",
-					`${a.passed ? "✓" : "✗"} ${a.id}: ${a.statement.slice(0, 80)}`,
+					`${label} ${a.id}: ${a.statement.slice(0, 80)}`,
 					a.evidence ?? undefined,
 					{ seat: "qa", thread: vThread },
 				);
 			}
 
 			// --- Boundary.
-			const failing = plan.contract.assertions.filter((a) => !a.passed);
+			// Pending assertions (owning feature not yet dispatched) are excluded from the
+			// failing set used by triage and stall decisions, but still block a CLEAN verdict.
+			const failing = plan.contract.assertions.filter((a) => !a.pending && !a.passed);
+			const pendingAssertions = plan.contract.assertions.filter((a) => a.pending);
 			const blockingBugs = scoreCard.bugs.filter((b) => b.severity === "critical" || b.severity === "high");
 			const openIssues = handoffs.flatMap((h) => h.issues.filter((i) => !i.disposition));
-			const clean = failing.length === 0 && blockingBugs.length === 0;
+			// CLEAN requires: no failures, no blocking bugs, AND no pending assertions
+			// (pending means the contract has not been fully evaluated yet).
+			const clean = failing.length === 0 && blockingBugs.length === 0 && pendingAssertions.length === 0;
 
 			const record: MilestoneRecord = {
 				index: m,
@@ -415,7 +425,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 			if (m === maxMilestones) {
 				verdict = "max-milestones";
 				record.verdict = verdict;
-				record.assessment = `Hit the ${maxMilestones}-milestone ceiling with ${failing.length} failing assertion(s), ${blockingBugs.length} blocking bug(s), ${openIssues.length} open issue(s).`;
+				record.assessment = `Hit the ${maxMilestones}-milestone ceiling with ${failing.length} failing assertion(s)${pendingAssertions.length > 0 ? `, ${pendingAssertions.length} pending` : ""}, ${blockingBugs.length} blocking bug(s), ${openIssues.length} open issue(s).`;
 				store.state.milestones.push(record);
 				store.save();
 				emit(`milestone ${m}: hit milestone ceiling — needs you`);
@@ -435,7 +445,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 				break;
 			}
 
-			emit(`milestone ${m}: ${failing.length} failing, ${blockingBugs.length} blocking bug(s), ${openIssues.length} open issue(s) — orchestrator triaging…`);
+			emit(`milestone ${m}: ${failing.length} failing${pendingAssertions.length > 0 ? `, ${pendingAssertions.length} pending` : ""}, ${blockingBugs.length} blocking bug(s), ${openIssues.length} open issue(s) — orchestrator triaging…`);
 			const review = await scopeCorrections({
 				config,
 				milestone: m,
@@ -530,6 +540,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 							env: missionEnv,
 							foreignRoot: config.targetCwd,
 							onProgress: (msg) => emit(`  validator: ${msg}`),
+							dispatchedFeatureIds: store.state.features.map((f) => f.id),
 						});
 						store.state.scoreCard = scoreCard;
 						store.state.costUsd += scoreCard.costUsd;
