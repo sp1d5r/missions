@@ -338,6 +338,16 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 				store.save();
 
 				// Surface the parts of the handoff a human would want to hear immediately.
+				//
+				// The error first, because a worker that died has nothing else to say. runWorker has
+				// always returned errorMessage and nothing ever read it, so a worker could fail at
+				// $0.000 having run no tools and the only trace was the word "(error)" beside its
+				// commit. Three did exactly that today and the cause is unrecoverable — the one
+				// piece of evidence that would have explained it was computed and dropped.
+				if (result.errorMessage) {
+					emit(`  ✗ ${feature.id} worker error: ${result.errorMessage}`);
+					store.appendEvent("error", `${feature.id} worker error`, result.errorMessage, { seat: "eng" });
+				}
 				if (result.handoff.degraded) emit(`  ⚠ ${feature.id}: no structured handoff — fell back to prose`);
 				if (!result.handoff.proceduresFollowed) emit(`  ⚠ ${feature.id}: procedures NOT followed — ${result.handoff.procedureNotes ?? "no reason given"}`);
 				for (const u of result.handoff.leftUndone) emit(`  ↯ ${feature.id} left undone: ${u}`);
