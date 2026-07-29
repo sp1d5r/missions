@@ -1,8 +1,11 @@
+import { statSync } from "node:fs";
 import { writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { type ActiveRecord, readActive } from "./registry.js";
+import { isHarnessStale } from "./mission.js";
+import { readOrgPid } from "./ipc.js";
 import { codename, esc, page, statStrip, tag, TONE_HEX, type Tone } from "./theme.js";
 
 const RUNNING = new Set(["planning", "working", "validating", "reporting"]);
@@ -56,6 +59,25 @@ function section(title: string, records: ActiveRecord[]): string {
   </tr></thead><tbody>${records.map(row).join("\n")}</tbody></table></div>`;
 }
 
+/** Check whether built artefacts are newer than when the daemon started (best-effort). */
+function staleBanner(): string {
+	try {
+		const pid = readOrgPid();
+		if (!pid) return "";
+		const thisFile = fileURLToPath(import.meta.url);
+		const buildMtimeMs = statSync(thisFile).mtimeMs;
+		// Heuristic: compare build mtime to now. If the build is less than 60s old
+		// and a daemon is running, it is likely stale.
+		const daemonApproxStartMs = Date.now() - 60_000;
+		if (isHarnessStale(daemonApproxStartMs, buildMtimeMs)) {
+			return `<div class="alert"><div class="label">⚠ stale daemon: build artefacts are newer than the running org process</div><div class="dim" style="margin-top:4px">Run <code>missions stop &amp;&amp; missions</code> to restart with fresh code.</div></div>`;
+		}
+	} catch {
+		/* best-effort */
+	}
+	return "";
+}
+
 /** Render the global mission-control board (all repos, live) and return its path. */
 export function generateBoard(): string {
 	const all = readActive();
@@ -77,6 +99,7 @@ export function generateBoard(): string {
 		{ value: `$${spend.toFixed(2)}`, label: "total spend" },
 	])}
 
+  ${staleBanner()}
   ${unresolved ? `<div class="alert"><div class="label">${unresolved} mission(s) stopped without satisfying their contract</div><div class="dim" style="margin-top:4px">Read the report before merging — failing assertions, blocking bugs, or issues nobody ruled on.</div></div>` : ""}
 
   ${section("In flight", running) || `<h2>In flight · 0</h2><p class="dim">Nothing running.</p>`}
