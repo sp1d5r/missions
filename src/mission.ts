@@ -2,11 +2,12 @@ import { join } from "node:path";
 import { applyEnvOverrides, bootstrapWorktree } from "./bootstrap.js";
 import { provisionDbBranch } from "./db-branch.js";
 import { resolveMissionEnv } from "./env.js";
+import { allocatePortBlock, assignPorts } from "./ports.js";
 import { addWorktree, commitAll, diffAgainst, ensureBranch, headSha, isGitRepo } from "./git.js";
 import { blocking, checkBoundary, checkContractRatchet, checkPlan, formatViolations, warnings } from "./invariants.js";
 import { humanBytes, reclaimWorktree } from "./lifecycle.js";
 import { type CorrectionRuling, planMission, scopeCorrections } from "./orchestrator.js";
-import { writeActive, repoName } from "./registry.js";
+import { readActive, writeActive, repoName } from "./registry.js";
 import { generateReport } from "./report.js";
 import { StateStore } from "./state.js";
 import { topLevelRecon } from "./target/index.js";
@@ -51,6 +52,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 			lastActivity,
 			reportPath: store.state.reportPath,
 			worktreePath: store.state.worktreePath,
+			portBase: store.state.portBase,
 			costUsd: store.state.costUsd,
 			done: store.state.status === "succeeded" || store.state.status === "failed",
 			milestone: store.state.milestones.length,
@@ -130,6 +132,39 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 		if (!setup.ok) emit("  ⚠ setup did not fully succeed — commands needing dependencies may fail");
 		store.save();
 
+		// Ports — one contiguous block per worktree, so two missions in this repo cannot bind the
+		// same number. Without this every other kind of isolation the harness does is undone by a
+		// shared `PORT=3000`: the second service fails to bind, the worker's smoke check reaches
+		// the FIRST mission's server, and validation passes against code this mission never wrote.
+		//
+		// Only with a worktree. Without one there is a single tree, nothing to collide with, and
+		// rewriting the env file would be editing the operator's own checkout.
+		let portOverrides: Record<string, string> = {};
+		if (useWorktree && setup.ports.length) {
+			// Blocks other live missions already own, across every repo — this machine is the
+			// shared resource, not the repo. A bind probe alone cannot see a mission that is
+			// simply between commands.
+			const claimed = readActive()
+				.filter((r) => !r.done && r.id !== store.state.id && typeof r.portBase === "number")
+				.map((r) => r.portBase as number);
+			const block = await allocatePortBlock(workCwd, { claimed });
+			portOverrides = assignPorts(setup.ports, block);
+			store.state.portBase = block.base;
+			// Published before the ports are used, so a mission starting alongside this one sees
+			// the claim. Two missions allocating in the same instant can still both take a block;
+			// the window is one file write, and a lock is not worth what it would cost here.
+			publish();
+			// On disk, not just injected: dotenv loads with override=True, so a file value wins.
+			if (applyEnvOverrides({ targetCwd: config.targetCwd, workCwd, envFile: ".env", missionId: store.state.id, overrides: portOverrides })) {
+				// applyEnvOverrides creates .env when the repo keeps none, and a file the harness
+				// placed here must never reach a commit.
+				if (!gitExcludes.includes(".env")) gitExcludes.push(".env");
+			}
+			emit(`ports: ${Object.entries(portOverrides).map(([k, v]) => `${k}=${v}`).join(" ")}${block.drift ? ` (derived block taken — moved ${block.drift})` : ""}`);
+		} else if (useWorktree) {
+			emit("⚠ ports: setup named no port env vars — a parallel mission in this repo may collide");
+		}
+
 		// The env every worker command and every assertion check runs under. Explicit, so that
 		// which tree a command reads is a decision here rather than an accident of the daemon's
 		// ambient environment or a venv's baked-in absolute paths.
@@ -139,6 +174,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 			missionId: store.state.id,
 			sourceRoots,
 			binDirs,
+			overrides: portOverrides,
 		});
 
 		// 1. Plan — the validation contract is written here, before any code exists.
@@ -185,7 +221,9 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 				missionId: store.state.id,
 				sourceRoots,
 				binDirs,
-				overrides: dbOutcome.branch.overrides,
+				// Both, and in this order: the database override is the later decision, but the
+				// ports must survive it. Dropping them here was the shape of the original bug.
+				overrides: { ...portOverrides, ...dbOutcome.branch.overrides },
 			});
 			dbTeardown = dbOutcome.branch.teardown;
 			emit(`database: ${dbOutcome.branch.note}`);

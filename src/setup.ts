@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { createCodingTools } from "@earendil-works/pi-coding-agent";
 import { Agent, getEnvApiKey, getModel, streamFn, type AgentEvent, type AgentMessage, type AssistantMessage, type KnownProvider } from "./pi.js";
+import { portVarNames } from "./ports.js";
 import type { ModelSpec } from "./types.js";
 
 const execFile = promisify(execFileCb);
@@ -61,6 +62,14 @@ export interface SetupRecord {
 	verify?: SetupStep;
 	/** Observed by the harness after setup, not reported by the agent. */
 	produced: { binDirs: string[]; sourceRoots: string[] };
+	/**
+	 * Env var names this repo binds a port with, in the order setup found them.
+	 *
+	 * Only the NAMES are recorded. The values are derived per worktree at run time (ports.ts) —
+	 * a recorded value would be replayed into two live trees at once, which is the collision
+	 * this exists to prevent.
+	 */
+	ports?: string[];
 }
 
 export interface SetupResult {
@@ -74,6 +83,8 @@ export interface SetupResult {
 	docUpdated?: string;
 	/** The repo's own smoke check, as reported by setup. A better default than the harness guessing. */
 	verifyCommand?: string;
+	/** Env var names carrying a port, for the caller to assign a per-worktree block to. */
+	ports: string[];
 	notes: string[];
 	costUsd: number;
 	error?: string;
@@ -260,7 +271,12 @@ Do this:
    given; never touch any other checkout.
 3. VERIFY it worked, using the repo's own smoke check if it documents one, otherwise the cheapest
    command that proves the code can actually run or build.
-4. FIX THE DOC when reality disagrees with it — a missing step, a stale command, a service that
+4. REPORT WHICH ENV VARS CARRY A PORT. Several worktrees of this repo run at once on one
+   machine, so every port they bind has to be overridable. List the env var NAMES the repo reads
+   a port from (e.g. PORT, API_PORT, VITE_PORT) — names only, never values, and never a variable
+   holding a URL. If a service hardcodes its port with no env var, say so in your notes: that is
+   a real defect for a human to fix, not something to work around.
+5. FIX THE DOC when reality disagrees with it — a missing step, a stale command, a service that
    needs an extra flag, an undocumented prerequisite. This correction is the most valuable thing
    you produce: it is what stops the next worktree rediscovering the same problem. Edit the doc
    file directly. If the repo has no setup doc, create SETUP.md with what you actually did.
@@ -281,6 +297,7 @@ End your final message with a fenced block tagged "setup" containing ONLY JSON:
   "ok": true,
   "steps": [{ "dir": ".", "cmd": "the exact command you ran, in order" }],
   "verify": { "dir": ".", "cmd": "the command that proves setup worked" },
+  "ports": ["ENV_VAR_NAMES_THAT_SET_A_PORT"],
   "docUpdated": "path/to/SETUP.md or null if you changed nothing",
   "notes": ["anything a human should know — especially what you could not make work"]
 }
@@ -330,7 +347,7 @@ export async function runSetup(options: RunSetupOptions): Promise<SetupResult> {
 		}
 		if (allOk) {
 			const produced = observeProduced(workCwd);
-			return { ok: true, mode: "replay", steps, ...produced, verifyCommand: verifyOf(record.verify), notes, costUsd: 0 };
+			return { ok: true, mode: "replay", steps, ...produced, verifyCommand: verifyOf(record.verify), ports: record.ports ?? [], notes, costUsd: 0 };
 		}
 		// Fall through to the agent — a failed replay means the world moved and the doc,
 		// or our record of it, needs repairing.
@@ -339,7 +356,7 @@ export async function runSetup(options: RunSetupOptions): Promise<SetupResult> {
 
 	// ── Agent: first run, changed inputs, or a broken replay ────────────────────────────
 	const resolved = getModel(spec.provider as KnownProvider, spec.modelId);
-	if (!resolved) return { ok: false, mode: "agent", steps: [], binDirs: [], sourceRoots: [], notes, costUsd: 0, error: `setup model not found: ${spec.provider}/${spec.modelId}` };
+	if (!resolved) return { ok: false, mode: "agent", steps: [], binDirs: [], sourceRoots: [], ports: [], notes, costUsd: 0, error: `setup model not found: ${spec.provider}/${spec.modelId}` };
 
 	const agent = new Agent({
 		initialState: {
@@ -394,10 +411,15 @@ Set it up, verify it, correct the doc if it was wrong, then emit your setup bloc
 	if (!parsed) {
 		const produced = observeProduced(workCwd);
 		notes.push("setup agent emitted no parseable setup block — recording nothing, so the next run re-runs the agent");
-		return { ok: produced.binDirs.length > 0, mode: "agent", steps: [], ...produced, notes, costUsd, error: "no setup block" };
+		return { ok: produced.binDirs.length > 0, mode: "agent", steps: [], ...produced, ports: [], notes, costUsd, error: "no setup block" };
 	}
 
 	const produced = observeProduced(workCwd);
+	// Filtered rather than trusted: a model asked for port variables will occasionally answer
+	// DATABASE_URL, and overwriting a connection string with "20003" is worse than no isolation.
+	const ports = portVarNames(parsed.ports ?? []);
+	if (ports.length) onProgress?.(`ports: ${ports.join(", ")} — assigned per worktree`);
+	else notes.push("setup reported no port env vars — parallel worktrees of this repo may collide on ports");
 	notes.push(...(parsed.notes ?? []));
 	if (aborted) notes.push(`setup agent hit its $${budgetUsd} budget and was stopped`);
 
@@ -412,6 +434,7 @@ Set it up, verify it, correct the doc if it was wrong, then emit your setup bloc
 			steps: parsed.steps,
 			verify: parsed.verify ?? undefined,
 			produced,
+			ports,
 		});
 		onProgress?.(`recorded ${parsed.steps.length} step(s) for replay`);
 	}
@@ -422,6 +445,7 @@ Set it up, verify it, correct the doc if it was wrong, then emit your setup bloc
 		steps: parsed.steps ?? [],
 		verifyCommand: verifyOf(parsed.verify ?? undefined),
 		...produced,
+		ports,
 		docUpdated: parsed.docUpdated ?? undefined,
 		notes,
 		costUsd,
@@ -438,6 +462,7 @@ interface RawSetup {
 	ok?: boolean;
 	steps?: SetupStep[];
 	verify?: SetupStep | null;
+	ports?: string[];
 	docUpdated?: string | null;
 	notes?: string[];
 }

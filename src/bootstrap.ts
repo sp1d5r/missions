@@ -68,6 +68,13 @@ export function bootstrapWorktree(options: BootstrapWorktreeOptions): BootstrapR
  *
  * Called after planning, because whether a mission needs (say) a branched database is something
  * only the plan can tell us.
+ *
+ * CALLS COMPOSE. The base is the worktree's own copy when one exists, falling back to the main
+ * checkout. Re-reading the main checkout every time looked equivalent and was not: ports are
+ * assigned after setup and a branched database after planning, so the second call would have
+ * rewritten the file from the original and silently dropped the first call's overrides — the
+ * mission would then run on the main checkout's ports, which is precisely the collision this
+ * was meant to prevent.
  */
 export function applyEnvOverrides(options: {
 	targetCwd: string;
@@ -82,8 +89,22 @@ export function applyEnvOverrides(options: {
 	if (!keys.length) return false;
 	const from = join(targetCwd, envFile);
 	const to = join(workCwd, envFile);
-	if (!existsSync(from)) return false;
-	const vars = { ...parseEnvFile(from), ...overrides };
+	// The worktree copy is the base once bootstrap has run, so earlier overrides survive.
+	const base = existsSync(to) ? to : from;
+	if (!existsSync(base)) {
+		// No env file anywhere: the overrides still have to land, or a mission in a repo that
+		// keeps no .env quietly runs on the default ports. Write one containing just them.
+		mkdirSync(dirname(to), { recursive: true });
+		writeFileSync(
+			to,
+			serializeEnvFile(overrides, [
+				`Written by the harness for mission ${missionId} — ${envFile} did not exist.`,
+				`Set here: ${keys.join(", ")}`,
+			]),
+		);
+		return true;
+	}
+	const vars = { ...parseEnvFile(base), ...overrides };
 	mkdirSync(dirname(to), { recursive: true });
 	writeFileSync(
 		to,

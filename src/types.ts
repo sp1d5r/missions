@@ -320,6 +320,11 @@ export interface MissionState {
 	baseSha?: string;
 	/** Isolated worktree dir the worker operated in (present when useWorktree). */
 	worktreePath?: string;
+	/**
+	 * First port of the block this worktree owns (ports.ts). Recorded so a human reading a report
+	 * knows where the mission's services were, without re-deriving the hash.
+	 */
+	portBase?: number;
 	plan?: Plan;
 	/** Every feature dispatched, plan + corrections, in dispatch order. */
 	features: Feature[];

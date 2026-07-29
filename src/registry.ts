@@ -16,6 +16,12 @@ export interface ActiveRecord {
 	lastActivity: string;
 	reportPath?: string;
 	worktreePath?: string;
+	/**
+	 * First port of the block this mission owns (ports.ts). Published here, not just in the
+	 * mission's own state, because the next mission to start has to see it: a bind probe cannot
+	 * detect a live mission that happens not to be listening at that moment.
+	 */
+	portBase?: number;
 	costUsd: number;
 	done: boolean;
 	/** Milestones completed so far, and the ceiling — "2/3" on the board. */
