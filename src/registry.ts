@@ -33,6 +33,15 @@ export interface ActiveRecord {
 	outcome?: string;
 	/** Set once the human has actioned it (merged/retried/dismissed) — drops it from the "needs you" queue. */
 	cleared?: boolean;
+	/**
+	 * What this mission wants from a human, in a sentence.
+	 *
+	 * A board row that says "NEEDS YOU" and nothing else makes the reader open the mission to
+	 * find out whether there is a decision to make or the harness merely gave up. The mission
+	 * already writes this sentence to `state.stallReason`; carrying it here is what lets the
+	 * board, the web console and the chief answer "what does it need?" without opening anything.
+	 */
+	needs?: string;
 	/** Full path to the run output directory (state.json lives here). */
 	outDir?: string;
 }

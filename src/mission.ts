@@ -60,6 +60,9 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 			maxMilestones,
 			verdict: store.state.finalVerdict,
 			outcome: store.state.outcome,
+			// The sentence the board shows instead of making the reader open the mission to
+			// discover whether there is a decision to make.
+			needs: store.state.stallReason,
 			outDir: config.outDir,
 		});
 	};
