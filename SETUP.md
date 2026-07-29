@@ -54,6 +54,45 @@ node test/routines.mjs     # routine scheduling and deduplication
 | `npm run dev` | watch-mode recompile |
 | `npm run clean` | delete `dist/` |
 
+## web/ — missions console (Next.js)
+
+The `web/` project is a Next.js front-end that imports from `../dist`, so the
+root package **must be installed and built first**.
+
+```bash
+# 1. Build the root package (produces dist/ that web/ imports)
+npm ci
+npm run build
+
+# 2. Install web dependencies
+cd web
+npm ci
+```
+
+### Build and verify
+
+```bash
+cd web
+npm run build      # production build — proves imports from ../dist resolve
+npm run typecheck  # TypeScript type-check only (no emit)
+```
+
+### Dev server
+
+```bash
+cd web
+npm run dev   # http://localhost:3200
+```
+
+**Port note:** the port is hardcoded as `--port 3200` in `package.json`.
+Next.js reads the `PORT` env var only when `--port` is absent, so the scripts
+as written do **not** honour `PORT`. To use a different port, edit
+`package.json` or pass the flag directly:
+
+```bash
+npx next dev --port <PORT>
+```
+
 ## Notes
 
 - `verify_stage1.mjs` is a separate integration test that exercises the real `nadine` repo at

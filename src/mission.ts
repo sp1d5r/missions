@@ -546,15 +546,20 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 					// decision.action === "stall"
 					const stalledBy = decision.invariants.join(", ") || "boundary violation";
 					const whatWasTried = retriedThisMilestone ? " Re-validation was attempted once." : "";
-					const fullReason = `${decision.reason}${whatWasTried}` +
+					const rawReason = `${decision.reason}${whatWasTried}` +
 						(decision.invariants.length > 0 ? ` (${decision.invariants.join(", ")})` : "");
-					store.state.stallReason = fullReason;
+					const fullReason = finalizeStall(
+						store.state,
+						rawReason,
+						m,
+						failing.map((a) => a.id),
+					);
 					verdict = "stalled";
 					record.verdict = verdict;
 					record.assessment = `${review.assessment}\n\n[harness] Boundary blocked by ${blockers.length} invariant violation(s):\n${formatViolations(blockers)}`;
 					store.state.milestones.push(record);
 					store.save();
-					emit(`milestone ${m}: STALLED — ${stalledBy} — needs you: ${decision.reason}`);
+					emit(`milestone ${m}: STALLED — ${stalledBy} — needs you: ${fullReason}`);
 					store.appendEvent("milestone_verdict", `milestone ${m}: STALLED`, fullReason, { seat: "lead" });
 					await offerRescue(liveThisMilestone, workCwd, gitExcludes, store, emit, config.rescueWaitMs);
 					break;
@@ -586,11 +591,16 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 
 			if (review.verdict !== "needs-corrections" || corrections.length === 0) {
 				// Build a full plain-language sentence for the stall reason (never a bare slug).
-				const noCorReason =
+				const rawNoCorReason =
 					corrections.length === 0
 						? "The orchestrator did not offer any corrections to address the failing assertions. A human needs to review the situation and decide what to do next."
 						: `The orchestrator's verdict was not 'needs-corrections' (got '${review.verdict}'), so corrections cannot be scoped. A human needs to review the orchestrator's assessment and resolve the discrepancy.`;
-				store.state.stallReason = noCorReason;
+				const noCorReason = finalizeStall(
+					store.state,
+					rawNoCorReason,
+					m,
+					failing.map((a) => a.id),
+				);
 				verdict = "stalled";
 				record.verdict = verdict;
 				store.state.milestones.push(record);
@@ -613,6 +623,18 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 		}
 
 		store.state.finalVerdict = verdict;
+		// Choke point: guarantee stallReason is non-empty for every terminal stall.
+		// The two explicit stall paths call finalizeStall directly, but an unexpected
+		// loop exit (e.g. empty queue on first iteration) could produce a stalled
+		// verdict with no reason — this catches that edge case.
+		if (verdict === "stalled") {
+			finalizeStall(
+				store.state,
+				store.state.stallReason,
+				store.state.milestones.length,
+				plan.contract.assertions.filter((a) => !a.passed).map((a) => a.id),
+			);
+		}
 		store.state.outcome = verdict === "passed" ? "clean" : "needs-review";
 		store.state.debrief = buildDebrief(store.state, scoreCard);
 		store.save();
@@ -670,6 +692,38 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 	}
 
 	return store.state;
+}
+
+/**
+ * Single choke point for every terminal finalVerdict==='stalled' path.
+ *
+ * Guarantees that state.stallReason is a non-empty sentence before the caller
+ * persists or emits. If the provided reason is already non-empty it is used
+ * unchanged. Otherwise a concrete fallback is synthesised from what is known:
+ * the number of milestones completed and the failing assertion ids.
+ *
+ * @param state          The live mission state (mutated: stallReason is set).
+ * @param providedReason The reason string produced by the stall path (may be
+ *                       empty or undefined if the path did not generate one).
+ * @param milestoneIndex The 1-based milestone number that triggered the stall.
+ * @param failingIds     Assertion ids that were failing at stall time.
+ * @returns              The non-empty stallReason that was stored.
+ */
+export function finalizeStall(
+	state: MissionState,
+	providedReason: string | undefined,
+	milestoneIndex: number,
+	failingIds: string[],
+): string {
+	if (providedReason && providedReason.trim().length > 0) {
+		state.stallReason = providedReason.trim();
+		return state.stallReason;
+	}
+	// Synthesise a concrete fallback that mentions what is known.
+	const idList = failingIds.length > 0 ? failingIds.join(", ") : "none";
+	const fallback = `Stalled after ${milestoneIndex} milestone${milestoneIndex === 1 ? "" : "s"}; failing assertions: ${idList}.`;
+	state.stallReason = fallback;
+	return fallback;
 }
 
 /**
