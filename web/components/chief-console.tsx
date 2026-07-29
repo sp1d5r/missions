@@ -62,10 +62,15 @@ export function ChiefConsole({ canMutate }: { canMutate: boolean }) {
 
 		es.addEventListener("history", (e) => {
 			const rows = JSON.parse((e as MessageEvent).data) as Partial<Block>[];
-			setBlocks(
-				rows
-					.filter((r): r is Block => typeof r.text === "string" && typeof r.at === "string")
-					.map((r) => ({ role: (r.role ?? "chief") as Role, text: r.text, at: r.at })),
+			const next = rows
+				.filter((r): r is Block => typeof r.text === "string" && typeof r.at === "string")
+				.map((r) => ({ role: (r.role ?? "chief") as Role, text: r.text, at: r.at }));
+			// Replayed on every reconnect, which now happens on a timer. Replacing an identical
+			// list would re-render the pane and lose the scroll position for no reason.
+			setBlocks((prev) =>
+				prev.length === next.length && prev.every((b, i) => b.text === next[i]?.text && b.at === next[i]?.at)
+					? prev
+					: next,
 			);
 			pinnedToBottom.current = true;
 			sealed.current = true;
@@ -73,7 +78,13 @@ export function ChiefConsole({ canMutate }: { canMutate: boolean }) {
 		es.addEventListener("open", () => setStatus("live"));
 		es.addEventListener("greet", (e) => {
 			const text = JSON.parse((e as MessageEvent).data) as string;
-			setBlocks((prev) => [...prev, { role: "chief" as const, text, at: new Date().toISOString() }]);
+			setBlocks((prev) => {
+				// The connection is now closed and reopened on a timer (see the stream route on
+				// why), and each reopen greets. Shown once, on an empty pane — otherwise the
+				// banner would land mid-conversation every segment.
+				if (prev.length) return prev;
+				return [...prev, { role: "chief" as const, text, at: new Date().toISOString() }];
+			});
 			// Sealed so the first real reply opens its own message rather than
 			// extending the banner.
 			sealed.current = true;

@@ -25,6 +25,21 @@ export const runtime = "nodejs";
 
 const RETRY_MS = 3000;
 
+/**
+ * How long one connection lives before it is closed so the client reconnects.
+ *
+ * Measured through a Cloudflare quick tunnel: a response is buffered in full and delivered only
+ * when it ENDS — eight chunks emitted two seconds apart all arrived together at +16.1s, and no
+ * padding, compression or HTTP-version change moved it. A stream that never ends therefore
+ * delivers nothing at all, so this pane was permanently blank on a phone while working perfectly
+ * on localhost.
+ *
+ * Ending the response on a timer turns "never" into "every segment": each close flushes whatever
+ * the proxy was holding, and EventSource reconnects on its own. Locally it costs one reconnect
+ * and a history replay every 25s, which is invisible because the replay is the same content.
+ */
+const SEGMENT_MS = 25_000;
+
 export async function GET(req: Request) {
 	const gate = await requireOperator();
 	if ("deny" in gate) return gate.deny;
