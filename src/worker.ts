@@ -370,7 +370,7 @@ function parseHandoff(finalText: string): { prose: string; handoff: RawHandoff |
  * Scan a tool result for image content parts (base64-encoded images embedded in tool responses).
  * Tolerates malformed input: any part that cannot be decoded is silently skipped.
  */
-function extractImageParts(result: unknown, toolName: string): Array<{ data: Buffer; mimeType: string; toolName: string }> {
+export function extractImageParts(result: unknown, toolName: string): Array<{ data: Buffer; mimeType: string; toolName: string }> {
 	const out: Array<{ data: Buffer; mimeType: string; toolName: string }> = [];
 	if (!result || typeof result !== "object") return out;
 	// Tool results may be an array of content parts or an object with a `content` array.

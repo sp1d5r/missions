@@ -193,21 +193,13 @@ check("integration: image written to disk and recorded in state.events", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 4. Worker image extraction from tool results (unit-tested via extractImageParts logic)
-//    We test the observable output: that the onProgress callback receives image events.
-//    We do this by constructing a mock tool_execution_end scenario via the exported
-//    internal. Since extractImageParts is not exported, we test it indirectly through
-//    the types validation — the key properties exist in the built output.
+// 4. MissionEvent.image field declared in built types (structural check)
 // ---------------------------------------------------------------------------
 
 check("MissionEvent.image field declared in built types (structural check)", () => {
-	// We verify the type by creating an event object with an image field and checking
-	// that StateStore accepts it without error.
 	const outDir = mkdtempSync(join(tmpdir(), "missions-img-struct-"));
 	try {
 		const store = new StateStore(outDir, makeState());
-		// If the type did not include image, appendEvent would silently ignore it.
-		// We verify the round-trip through JSON.
 		store.appendEvent("image", "test", undefined, {
 			image: { path: "/tmp/test.png", mimeType: "image/png", bytes: 99, alt: "test image" },
 		});
@@ -220,15 +212,119 @@ check("MissionEvent.image field declared in built types (structural check)", () 
 });
 
 // ---------------------------------------------------------------------------
-// 5. Malformed tool result tolerance (static test of expected behavior)
-//    The extractImageParts function is private, but we can verify that it does
-//    NOT throw when fed garbage by checking the worker module loads without error.
+// 5. Worker extractImageParts — behavioural (Anthropic + OpenAI shapes,
+//    non-image ignored, malformed-tolerant, base64 decoded correctly).
+//    This covers the a7 contract: on tool_execution_end, image parts in
+//    result.content are decoded and surfaced.
 // ---------------------------------------------------------------------------
 
-check("worker module loads without error (malformed-safety pre-check)", async () => {
-	// Importing the module should not throw.
-	const workerMod = await import("../dist/worker.js");
-	assert(typeof workerMod.runWorker === "function", "runWorker is not a function");
+const { extractImageParts } = await import("../dist/worker.js");
+
+check("extractImageParts is exported and callable", () => {
+	assert(typeof extractImageParts === "function", "extractImageParts is not a function");
+});
+
+check("extractImageParts decodes Anthropic-style {source:{type:base64,media_type,data}}", () => {
+	const payload = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+	const b64 = payload.toString("base64");
+	const result = {
+		content: [
+			{ type: "text", text: "here is your image" },
+			{ type: "image", source: { type: "base64", media_type: "image/png", data: b64 } },
+		],
+	};
+	const parts = extractImageParts(result, "screenshot_tool");
+	assert(parts.length === 1, `expected 1 image part, got ${parts.length}`);
+	assert(parts[0].mimeType === "image/png", `mimeType mismatch: ${parts[0].mimeType}`);
+	assert(parts[0].toolName === "screenshot_tool", `toolName mismatch: ${parts[0].toolName}`);
+	assert(Buffer.isBuffer(parts[0].data), "data is not a Buffer");
+	assert(parts[0].data.equals(payload), "decoded bytes do not match original payload");
+});
+
+check("extractImageParts decodes OpenAI-style {data,mimeType}", () => {
+	const payload = Buffer.from("openai style bytes");
+	const result = {
+		content: [
+			{ type: "image", data: payload.toString("base64"), mimeType: "image/jpeg" },
+		],
+	};
+	const parts = extractImageParts(result, "vision_tool");
+	assert(parts.length === 1, `expected 1 image part, got ${parts.length}`);
+	assert(parts[0].mimeType === "image/jpeg", `mimeType mismatch: ${parts[0].mimeType}`);
+	assert(parts[0].data.equals(payload), "decoded bytes mismatch");
+});
+
+check("extractImageParts also accepts result as a bare array of parts", () => {
+	const payload = Buffer.from("bare array");
+	const parts = extractImageParts(
+		[{ type: "image", data: payload.toString("base64"), mimeType: "image/webp" }],
+		"t",
+	);
+	assert(parts.length === 1, "bare-array shape not accepted");
+	assert(parts[0].mimeType === "image/webp");
+	assert(parts[0].data.equals(payload));
+});
+
+check("extractImageParts extracts multiple image parts in order", () => {
+	const a = Buffer.from("first");
+	const b = Buffer.from("second");
+	const result = {
+		content: [
+			{ type: "image", source: { type: "base64", media_type: "image/png", data: a.toString("base64") } },
+			{ type: "text", text: "middle" },
+			{ type: "image", data: b.toString("base64"), mimeType: "image/gif" },
+		],
+	};
+	const parts = extractImageParts(result, "multi");
+	assert(parts.length === 2, `expected 2, got ${parts.length}`);
+	assert(parts[0].data.equals(a), "first payload mismatch");
+	assert(parts[1].data.equals(b), "second payload mismatch");
+	assert(parts[1].mimeType === "image/gif");
+});
+
+check("extractImageParts ignores non-image parts", () => {
+	const result = {
+		content: [
+			{ type: "text", text: "no images here" },
+			{ type: "tool_use", id: "abc" },
+		],
+	};
+	const parts = extractImageParts(result, "t");
+	assert(parts.length === 0, `expected 0 parts, got ${parts.length}`);
+});
+
+check("extractImageParts tolerates malformed input without throwing", () => {
+	// Each of these must return [] and not throw.
+	const cases = [
+		null,
+		undefined,
+		"just a string",
+		42,
+		{},
+		{ content: "not an array" },
+		{ content: [null, undefined, 0, "text"] },
+		{ content: [{ type: "image" /* no source, no data */ }] },
+		{ content: [{ type: "image", source: { type: "url", url: "http://x" } }] },
+		{ content: [{ type: "image", source: { type: "base64", media_type: "image/png" /* no data */ } }] },
+		{ content: [{ type: "image", data: 12345, mimeType: "image/png" }] }, // non-string data
+		{ content: [{ type: "image", data: "abc" /* no mimeType */ }] },
+	];
+	for (const c of cases) {
+		const parts = extractImageParts(c, "t");
+		assert(Array.isArray(parts), `expected array for input ${JSON.stringify(c)}`);
+		assert(parts.length === 0, `expected 0 parts for malformed input ${JSON.stringify(c)}, got ${parts.length}`);
+	}
+});
+
+check("extractImageParts propagates provided toolName onto every part", () => {
+	const payload = Buffer.from("x");
+	const result = {
+		content: [
+			{ type: "image", source: { type: "base64", media_type: "image/png", data: payload.toString("base64") } },
+		],
+	};
+	const parts = extractImageParts(result, "my_special_tool");
+	assert(parts[0].toolName === "my_special_tool");
 });
 
 // ---------------------------------------------------------------------------
