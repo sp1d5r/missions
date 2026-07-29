@@ -45,6 +45,9 @@ const arg = (name, fallback) => {
 const HEAD_NAMES = String(arg("heads", "confidence,direction,assumption,naive")).split(",");
 const LIMIT = Number(arg("limit", Infinity));
 const CONCURRENCY = Number(arg("concurrency", 6));
+/** Re-run a slice (e.g. `--only disposition`) without disturbing the recorded full run. */
+const ONLY = arg("only", "");
+const OUT = arg("out", "results.json");
 
 /** Strip frontmatter — the body is the system prompt, same shape as .missions/agents/*.md. */
 function loadHead(name) {
@@ -71,7 +74,9 @@ async function pool(items, n, fn) {
 
 const heads = HEAD_NAMES.map(loadHead);
 const model = autoRouting().worker;
-const fixtures = [...labelledFixtures(), ...realFixtures()].slice(0, LIMIT);
+const fixtures = [...labelledFixtures(), ...realFixtures()]
+	.filter((f) => !ONLY || f.kind === ONLY || f.id.includes(ONLY))
+	.slice(0, LIMIT);
 
 const real = fixtures.filter((f) => f.source !== "contracts" && f.expect === null);
 const labelled = fixtures.filter((f) => f.expect !== null);
@@ -170,6 +175,6 @@ for (const r of flags) {
 }
 console.log("");
 
-const out = join(HERE, "results.json");
+const out = join(HERE, OUT);
 writeFileSync(out, JSON.stringify({ model, cost, results }, null, "\t"));
 console.log(`spend $${cost.toFixed(3)} · full results → ${out}`);

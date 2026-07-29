@@ -65,8 +65,10 @@ function dispositionPrompt({ goal, issue, assertions }) {
 		`\nTHE ORCHESTRATOR'S RULING: ${issue.disposition}`,
 		`ITS STATED REASON:\n  ${clip(issue.dispositionNote, 700)}`,
 		assertions?.length
-			? `\nWHAT THE VALIDATION CONTRACT ACTUALLY RAN:\n${assertions.map((a) => `  - [${a.status}] ${clip(a.what, 220)}`).join("\n")}`
-			: "",
+			? `\nWHAT THE VALIDATION CONTRACT ACTUALLY RAN:\n${assertions
+					.map((a) => `  - [${a.status}${a.strength ? `, ${a.strength}` : ""}] ${clip(a.what, 220)}`)
+					.join("\n")}`
+			: "\nWHAT THE VALIDATION CONTRACT ACTUALLY RAN:\n  (no contract recorded for this run)",
 	]
 		.filter(Boolean)
 		.join("\n");
@@ -88,12 +90,16 @@ export function realFixtures() {
 			}
 			const short = dir.replace(/^run-/, "").slice(0, 16);
 			const featureOf = (id) => (s.features || []).find((f) => f.id === id);
-			const assertions = (s.features || []).flatMap((f) =>
-				(f.assertions || []).map((a) => ({
-					status: a.status ?? "?",
-					what: a.command || a.description || a.id,
-				})),
-			);
+			// The contract lives on the plan, not on the feature — `feature.assertions` does not
+			// exist, and reading it silently produced an EMPTY contract section for every real
+			// disposition fixture in the first run of this spike. A confidence head judging a
+			// disposition without seeing what the validators actually ran is being asked the
+			// wrong question, which is why that run produced zero disposition flags.
+			const assertions = (s.plan?.contract?.assertions || []).map((a) => ({
+				status: a.passed === true ? "passed" : a.passed === false ? "FAILED" : "not run",
+				strength: a.strength ?? "?",
+				what: a.method?.command || a.statement || a.id,
+			}));
 
 			for (const h of s.handoffs || []) {
 				const f = featureOf(h.featureId);
