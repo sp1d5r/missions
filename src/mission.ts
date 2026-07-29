@@ -69,6 +69,22 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 		publish();
 		onEvent?.({ type: "log", message });
 	};
+	/**
+	 * Record activity that is too frequent to write on every occurrence.
+	 *
+	 * A worker fires tool events several times a second; publishing each one would rewrite the
+	 * registry file that often for no gain. Throttling keeps the board honest about liveness —
+	 * which is all it needs — without making the mission an IO source.
+	 */
+	let lastTouch = 0;
+	const TOUCH_INTERVAL_MS = 3_000;
+	const touch = (message: string) => {
+		lastActivity = message;
+		const now = Date.now();
+		if (now - lastTouch < TOUCH_INTERVAL_MS) return;
+		lastTouch = now;
+		publish();
+	};
 	const setStatus = (status: MissionState["status"]) => {
 		store.state.status = status;
 		store.appendEvent("status_transition", `status → ${status}`, undefined, { seat: "system" });
@@ -282,7 +298,16 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 					scouts,
 					envDoctrine: schemaWarning ? `HARNESS WARNING: ${schemaWarning}` : undefined,
 					onProgress: (e) => {
-						if (e.type === "tool") onEvent?.({ type: "log", message: `  ${feature.id} → ${e.toolName}` });
+						if (e.type === "tool") {
+							// Publish, not just stream. Tool events used to go straight to onEvent, so the
+							// registry record went untouched for the whole working phase — the longest one
+							// — and the board showed a live mission as frozen at its last status change.
+							// Measured: 57 consecutive tool events with zero registry writes. It also
+							// silently trips isStalled(), which judges liveness by updatedAt against a
+							// one-hour threshold, so any long working phase reads as stalled while running.
+							touch(`  ${feature.id} → ${e.toolName}`);
+							onEvent?.({ type: "log", message: `  ${feature.id} → ${e.toolName}` });
+						}
 					},
 				});
 				store.state.costUsd += result.costUsd;
