@@ -15,7 +15,7 @@
 	"scripts": {
 		"clean": "shx rm -rf dist",
 		"build": "tsgo -p tsconfig.build.json && shx chmod +x dist/cli.js",
-		"test": "npm run build && node test/invariants.mjs && node test/control.mjs && node test/lifecycle.mjs && node test/bootstrap.mjs && node test/ports.mjs && node test/seats.mjs && node test/setup.mjs && node test/workers.mjs && node test/routines.mjs",
+		"test": "npm run build && node test/invariants.mjs && node test/control.mjs && node test/lifecycle.mjs && node test/bootstrap.mjs && node test/ports.mjs && node test/seats.mjs && node test/registry.mjs && node test/setup.mjs && node test/workers.mjs && node test/routines.mjs",
 		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
 		"prepublishOnly": "npm run clean && npm run build"
 	},

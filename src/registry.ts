@@ -37,6 +37,41 @@ export interface ActiveRecord {
 	outDir?: string;
 }
 
+/**
+ * How long a record may go untouched before we stop calling it alive.
+ *
+ * A running mission republishes on every log line, so silence is strong evidence. The window is
+ * generous because the one legitimately quiet stretch is a setup step — a cold `pdm install` can
+ * run twenty minutes and emits progress only when it finishes — and calling a live mission dead
+ * is the worse error of the two.
+ */
+export const STALE_AFTER_MS = 60 * 60_000;
+
+/**
+ * Is this mission actually running?
+ *
+ * `!done` is NOT the same question, and treating it as such was a real bug: a mission whose
+ * process is killed — Ctrl-C, a crashed daemon, a closed laptop — never gets to write a terminal
+ * status, so its record sits at `working` forever. Measured on a live org, three of three
+ * "running" missions had been dead for 27 to 40 hours, and both the chief's greeting and the
+ * web board reported them as in flight.
+ *
+ * That failure is worse than it looks. Zombies are not `done`, so they are also excluded from the
+ * "needs you" queue — they were counted as healthy and were unreachable at the same time. Call
+ * these stalled and they become something you can act on.
+ */
+export function isLive(rec: ActiveRecord, now = Date.now()): boolean {
+	if (rec.done) return false;
+	const touched = Date.parse(rec.updatedAt);
+	if (Number.isNaN(touched)) return false;
+	return now - touched < STALE_AFTER_MS;
+}
+
+/** Unfinished, but silent long enough that its process is presumed gone. */
+export function isStalled(rec: ActiveRecord, now = Date.now()): boolean {
+	return !rec.done && !isLive(rec, now);
+}
+
 export function writeActive(rec: ActiveRecord): void {
 	mkdirSync(ACTIVE_DIR(), { recursive: true });
 	writeFileSync(join(ACTIVE_DIR(), `${rec.id}.json`), JSON.stringify(rec, null, 2));

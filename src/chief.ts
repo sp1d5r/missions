@@ -9,7 +9,7 @@ import { mergeBranch } from "./git.js";
 import { reclaimBranch, reclaimWorktree } from "./lifecycle.js";
 import { runMission } from "./mission.js";
 import { autoRouting } from "./models.js";
-import { readActive, updateActive } from "./registry.js";
+import { isLive, isStalled, readActive, updateActive } from "./registry.js";
 import { renderSweep, sweep } from "./lifecycle.js";
 import { dispatchScouts, loadAgentSpecs } from "./subagent.js";
 import { listWorkspaces, registerWorkspace, resolveWorkspace, workspaceNames } from "./workspaces.js";
@@ -428,14 +428,53 @@ export function createChiefSession(homeCwd: string): ChiefSession {
 			listeners.add(cb);
 			return () => listeners.delete(cb);
 		},
+		/**
+		 * Printed on every attach — so it answers rather than instructs.
+		 *
+		 * The second line used to read "Talk to me. Name any repo and I'll work there. Missions
+		 * run in the background. 'what's going on?' · Ctrl-C detaches." That is a tutorial, shown
+		 * every time to the person who wrote the thing, and it teaches nothing after the first
+		 * day. Worse, it invited a question — "what's going on?" — whose answer we already have
+		 * in hand, so it spent two lines asking you to ask for something it could simply say.
+		 * The detach hint was redundant on top of that: the status bar carries it permanently.
+		 *
+		 * The hint survives in the one situation where it is not noise — an empty org, which is
+		 * both the state with nothing to report and, necessarily, the state a new user is in.
+		 */
 		greeting() {
 			const others = listWorkspaces().filter((w) => w.path !== focus).length;
-			return (
+			const head =
 				`${chalk.bold("☀  missions")} — chief of staff, focused on ${chalk.dim(basename(focus))}` +
-				(others ? chalk.dim(` (+${others} other repo${others === 1 ? "" : "s"})`) : "") +
-				"\n" +
-				chalk.dim(`Talk to me. Name any repo and I'll work there. Missions run in the background. "what's going on?" · Ctrl-C detaches.\n`)
-			);
+				(others ? chalk.dim(` (+${others} other repo${others === 1 ? "" : "s"})`) : "");
+
+			const all = readActive();
+			// Genuinely in flight — see isLive. `!done` is a different and much weaker claim: a
+			// mission killed mid-run never writes a terminal status and would be counted as
+			// running forever.
+			const running = all.filter((r) => isLive(r)).length;
+			const stalled = all.filter((r) => isStalled(r)).length;
+			// Finished, not yet actioned, and did not come back clean: the only queue that is
+			// actually waiting on a human.
+			const needsYou = all.filter((r) => r.done && !r.cleared && r.outcome !== "clean").length;
+			const today = new Date().toISOString().slice(0, 10);
+			const spend = all.filter((r) => (r.updatedAt ?? "").startsWith(today)).reduce((n, r) => n + (r.costUsd ?? 0), 0);
+
+			if (!all.length) {
+				return `${head}\n${chalk.dim("Nothing running. Name a repo and a goal, and I'll start a mission there.\n")}`;
+			}
+
+			const parts = [
+				running ? `${running} running` : null,
+				// Amber: the two parts of this line that want a decision from you. A stalled
+				// mission is not merely absent from the board, it is holding a worktree and a
+				// branch, so it is worth naming rather than quietly not counting.
+				needsYou ? chalk.yellow(`${needsYou} need${needsYou === 1 ? "s" : ""} you`) : null,
+				stalled ? chalk.yellow(`${stalled} stalled`) : null,
+				spend > 0.005 ? `$${spend.toFixed(2)} today` : null,
+			].filter(Boolean);
+			// Everything on the board is finished and actioned — say so rather than printing an
+			// empty line, which reads as a bug.
+			return `${head}\n${chalk.dim(parts.length ? parts.join(" · ") : "All quiet — nothing running, nothing waiting on you.")}\n`;
 		},
 		activeMissions() {
 			return runnerRef.activeCount;
