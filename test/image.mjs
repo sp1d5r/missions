@@ -69,16 +69,16 @@ check("attachImage writes file to outDir/images/<sha256>.<ext>", () => {
 		assert(typeof result.bytes === "number", "result.bytes must be a number");
 		assert(result.bytes === data.length, `bytes mismatch: ${result.bytes} !== ${data.length}`);
 
-		// File must exist on disk
-		assert(existsSync(result.path), `file does not exist: ${result.path}`);
+		// Path is relative to outDir: images/<sha>.<ext>
+		const sha = createHash("sha256").update(data).digest("hex");
+		assert(result.path === `images/${sha}.png`, `unexpected path: ${result.path}`);
 
-		// Path must be inside outDir/images/
-		const expectedDir = join(outDir, "images");
-		assert(result.path.startsWith(expectedDir), `path not in images dir: ${result.path}`);
+		// File must exist on disk when resolved against outDir
+		const fullPath = join(outDir, result.path);
+		assert(existsSync(fullPath), `file does not exist: ${fullPath}`);
 
 		// Filename must be <sha256>.<ext>
 		const filename = basename(result.path);
-		const sha = createHash("sha256").update(data).digest("hex");
 		assert(filename === `${sha}.png`, `unexpected filename: ${filename}`);
 	} finally {
 		rmSync(outDir, { recursive: true, force: true });
@@ -92,14 +92,15 @@ check("attachImage is idempotent — same bytes, same path, file not rewritten",
 		const data = Buffer.from("idempotent content");
 
 		const r1 = store.attachImage(data, "image/png");
-		const mtimeBefore = existsSync(r1.path) ? readFileSync(r1.path).length : -1;
+		const full1 = join(outDir, r1.path);
+		const mtimeBefore = existsSync(full1) ? readFileSync(full1).length : -1;
 
 		const r2 = store.attachImage(data, "image/png");
 
 		assert(r1.path === r2.path, `paths differ on second call: ${r1.path} vs ${r2.path}`);
 		assert(r1.bytes === r2.bytes, "bytes differ on second call");
 		// File contents unchanged
-		const contents = readFileSync(r1.path);
+		const contents = readFileSync(full1);
 		assert(contents.equals(data), "file contents changed on second attach");
 	} finally {
 		rmSync(outDir, { recursive: true, force: true });
@@ -181,9 +182,10 @@ check("integration: image written to disk and recorded in state.events", () => {
 		assert(imgEvent.image.bytes === rawData.length, "bytes mismatch in persisted event");
 		assert(imgEvent.image.mimeType === "image/png", "mimeType mismatch");
 
-		// The file must still be on disk
-		assert(existsSync(stored.path), `image file not on disk: ${stored.path}`);
-		const onDisk = readFileSync(stored.path);
+		// The file must still be on disk (resolve relative path against outDir)
+		const storedFull = join(outDir, stored.path);
+		assert(existsSync(storedFull), `image file not on disk: ${storedFull}`);
+		const onDisk = readFileSync(storedFull);
 		assert(onDisk.equals(rawData), "file contents on disk do not match original data");
 	} finally {
 		rmSync(outDir, { recursive: true, force: true });

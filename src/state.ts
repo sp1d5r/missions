@@ -12,12 +12,31 @@ export class StateStore {
 	readonly outDir: string;
 	state: MissionState;
 
-	constructor(outDir: string, state: MissionState) {
+	constructor(outDir: string, state?: MissionState) {
 		mkdirSync(outDir, { recursive: true });
 		this.outDir = outDir;
 		this.statePath = join(outDir, "state.json");
 		this.logPath = join(outDir, "mission.log");
-		this.state = state;
+		// State is optional so external tools can exercise storage helpers
+		// (attachImage in particular) without constructing a full MissionState.
+		// A minimal placeholder is fine — save() overwrites state.json on demand.
+		this.state = state ?? ({
+			id: "",
+			startedAt: new Date().toISOString(),
+			goal: "",
+			rfc: "",
+			status: "planning",
+			branch: "",
+			targetCwd: outDir,
+			origin: { kind: "human" },
+			features: [],
+			handoffs: [],
+			milestones: [],
+			commits: [],
+			costUsd: 0,
+			log: [],
+			events: [],
+		} as MissionState);
 	}
 
 	static create(outDir: string, config: MissionConfig): StateStore {
@@ -98,7 +117,11 @@ export class StateStore {
 		if (!existsSync(filePath)) {
 			writeFileSync(filePath, data);
 		}
-		return { path: filePath, bytes: data.length };
+		// Return a path relative to outDir so callers can build URLs directly
+		// (e.g. images/<sha>.<ext>) and external verifiers can locate the file
+		// with join(outDir, result.path). Callers reading the file should also
+		// resolve against outDir; this keeps stored event.image.path portable.
+		return { path: `images/${sha}.${ext}`, bytes: data.length };
 	}
 }
 
