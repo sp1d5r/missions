@@ -39,10 +39,27 @@ Note: "behavioral" method assertions (end-to-end scenarios) are SKIPPED by the h
 passed — they never satisfy the behavioural strength requirement. Use bash-command with strength "behavioural"
 for executable checks.
 
+ARCHITECTURE. Draw the part of the system this mission touches, as mermaid flowchart source in
+the "architecture" field. Rules that make it worth reading:
+- Components as they exist in THIS repo — real module, service or file names, not generic boxes.
+- Edges are real relationships: calls, reads, writes, publishes to. Label them.
+- Mark every node this mission CHANGES with :::touched, and end with the line
+  classDef touched stroke:#d08b28,stroke-width:2px
+  That contrast — what exists versus what you are about to move — is the point of the diagram.
+- Six to twelve nodes. A diagram of everything is a diagram of nothing.
+- Quote every label ("like this") so punctuation cannot break the parse, and use <br/> for line
+  breaks. Do not use parentheses or angle brackets inside a label.
+Example shape:
+  flowchart LR
+    A["relay.ts"] -->|"publishes"| B["pubsub.ts"]
+    B --> C["db.ts"]:::touched
+    classDef touched stroke:#d08b28,stroke-width:2px
+
 Output ONLY a JSON object, no prose, in exactly this shape:
 {
   "summary": "one paragraph: what we will do and why",
   "architectureNote": "one line: current state -> target state",
+  "architecture": "mermaid flowchart source — see ARCHITECTURE below",
   "features": [
     { "id": "f1", "title": "short", "description": "what to change and where", "assertionIds": ["a1"],
       "procedures": ["run the targeted test before finishing", "do not touch the public API"] }
@@ -96,6 +113,9 @@ Produce the plan + validation contract now. At most ${config.maxFeatures} featur
 	const plan: Plan = {
 		summary: parsed.summary ?? "",
 		architectureNote: parsed.architectureNote ?? "",
+		// Only keep something that is actually a flowchart — a model that answered in prose here
+		// would otherwise render as a mermaid parse error in the console.
+		architecture: typeof parsed.architecture === "string" && /^\s*(flowchart|graph)\s/.test(parsed.architecture) ? parsed.architecture.trim() : undefined,
 		features: parsed.features.map((f, i) => ({
 			id: f.id ?? `f${i + 1}`,
 			title: f.title ?? `Feature ${i + 1}`,

@@ -79,6 +79,18 @@ export interface Plan {
 	summary: string;
 	/** One-line current→target architecture note, rendered in the report diagram. */
 	architectureNote: string;
+	/**
+	 * A real system-architecture diagram, as mermaid `flowchart` source.
+	 *
+	 * `architectureNote` is one line ("current -> target"), which is a caption, not a diagram —
+	 * the console could only ever draw the contract map from it, and a feature-to-assertion
+	 * mapping is not architecture. Reviewing a change at the level of "what talks to what, and
+	 * which of those does this mission touch" needs the planner to actually say so, and the
+	 * planner is the only thing in the system that has read the repo and decided.
+	 *
+	 * Optional: plans written before this existed still parse and run.
+	 */
+	architecture?: string;
 	features: Feature[];
 	contract: ValidationContract;
 }
