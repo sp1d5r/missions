@@ -27,11 +27,37 @@ import { createJiti } from "jiti";
 import { Type, type AgentTool } from "./pi.js";
 import type { ModelSpec } from "./types.js";
 
-/** Reading only. Not configurable — see the module comment. */
-export const SCOUT_TOOLS = ["read", "grep", "find", "ls"] as const;
+/**
+ * What a scout can do by default.
+ *
+ * `bash` is here deliberately. A scout without it can read source and guess, but cannot answer
+ * the questions a worker most wants delegated — does this test pass, what does this command
+ * print, is this binary on PATH, does this import resolve. Those answers come from running
+ * something, and a scout that can only read hands back a plausible reading of the code instead
+ * of the fact. That is the failure mode this whole harness exists to avoid.
+ *
+ * The cost is real and worth stating: bash can write, scouts run up to MAX_SCOUTS at a time, and
+ * they share the worker's tree. So the serialized-writer invariant is no longer enforced by tool
+ * grant — it is enforced by the scout prompt and by the worker owning every commit. A scout that
+ * edits is a bug, not a permitted move.
+ */
+export const SCOUT_TOOLS = ["read", "grep", "find", "ls", "bash"] as const;
 
 /** Concurrency cap for one delegate call. Scouts are cheap but not free. */
 const MAX_SCOUTS = 4;
+
+/**
+ * Read a `tools:` frontmatter value into a tool list.
+ *
+ * Accepts a YAML list or a comma/space separated string, because a spec author will write
+ * whichever feels natural and a silently ignored declaration is worse than a rejected one.
+ * Returns undefined when nothing usable was declared, so the caller can apply its default.
+ */
+export function parseToolList(raw: unknown): string[] | undefined {
+	const items = Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split(/[,\s]+/) : [];
+	const names = items.map((t) => String(t).trim()).filter(Boolean);
+	return names.length ? names : undefined;
+}
 
 export interface AgentSpec {
 	name: string;
@@ -95,7 +121,18 @@ async function loadEngine(): Promise<{ runAgent: RunAgentFn; registry: ModelRegi
 const DEFAULT_SCOUT_PROMPT = `You are a SCOUT. A coding worker has delegated one question to you so it does not have to
 spend its own context finding the answer.
 
-You can only read. Investigate, then answer the question and nothing else.
+You can read AND run commands. Investigate, then answer the question and nothing else.
+
+RUN THINGS. If the question can be settled by executing something — does this test pass, what does this
+command print, is this binary on PATH, does this import resolve, what is this file's actual size — then
+run it and report what happened. A command's output is evidence; your reading of the source is an
+inference. When the two disagree, the command is right. Quote the exact command and its exit code.
+
+YOU DO NOT WRITE. The worker owns this tree and every commit in it, and other scouts are running beside
+you right now. Never edit, create, move or delete a file; never git add, commit, checkout, stash or
+reset; never install, upgrade or remove a package; never start a long-lived server or background process.
+If answering seems to require changing something, that is the worker's decision — report what you found
+and why you stopped. A scout that mutates the tree corrupts work it cannot see.
 
 SEARCH THE PROJECT'S OWN CODE FIRST — its source directory (src/, lib/, app/), its tests, its top-level
 docs. Questions are almost always about the project, not its dependencies. NEVER search node_modules,
@@ -150,8 +187,10 @@ export function loadAgentSpecs(repo: string): AgentSpec[] {
 		specs.push({
 			name: fm.name,
 			description: fm.description,
-			// Declared tools are read for documentation only; the runner is handed SCOUT_TOOLS.
-			tools: [...SCOUT_TOOLS],
+			// A repo that declares tools in frontmatter gets them. This used to be parsed and then
+			// thrown away, so a spec asking for anything was silently overridden. Frontmatter is
+			// untyped text, so "read, bash" and a YAML list both have to land as string[].
+			tools: parseToolList(fm.tools) ?? [...SCOUT_TOOLS],
 			model: fm.model,
 			systemPrompt: m[2]?.trim() || DEFAULT_SCOUT_PROMPT,
 			source: "project",
@@ -200,7 +239,7 @@ export async function dispatchScouts(options: DispatchOptions): Promise<ScoutRes
 			const spec = specs.find((s) => s.name === t.agent) ?? BUILTIN_SCOUT;
 			const resolved: AgentSpec = {
 				...spec,
-				tools: [...SCOUT_TOOLS],
+				tools: spec.tools?.length ? spec.tools : [...SCOUT_TOOLS],
 				model: spec.model ?? (model ? `${model.provider}/${model.modelId}` : undefined),
 			};
 			onProgress?.(`scout ${spec.name}: ${t.task.slice(0, 60)}`);

@@ -86,6 +86,26 @@ export interface PlanContext {
 	envDoctrine?: string;
 }
 
+/**
+ * Read the planner's `architecture` field into usable mermaid source, or nothing.
+ *
+ * Tolerant about packaging, strict about content. A model asked for "mermaid flowchart source"
+ * will sometimes hand back a ```mermaid fence or a `---\ntitle: …\n---` header, and dropping a
+ * perfectly good diagram over its wrapper is how the console ends up claiming a mission is too
+ * old to have one. What it will not accept is prose: that renders as a mermaid parse error, which
+ * is worse than an honest absence.
+ */
+export function parseArchitecture(raw: unknown): string | undefined {
+	if (typeof raw !== "string") return undefined;
+	let s = raw.trim();
+	const fence = s.match(/```(?:mermaid)?\s*\n([\s\S]*?)```/);
+	if (fence?.[1]) s = fence[1].trim();
+	// Mermaid's own frontmatter block, which legitimately precedes the graph declaration.
+	const fm = s.match(/^---\n[\s\S]*?\n---\n([\s\S]*)$/);
+	if (fm?.[1]) s = fm[1].trim();
+	return /^(flowchart|graph)\b/.test(s) ? s : undefined;
+}
+
 export async function planMission(
 	config: MissionConfig,
 	repoSummary: string,
@@ -106,6 +126,7 @@ Produce the plan + validation contract now. At most ${config.maxFeatures} featur
 
 	const { text, costUsd } = await complete(config.routing.orchestrator, SYSTEM_PROMPT, userPrompt);
 	const parsed = parseJson<Plan>(text);
+
 	if (!parsed || !Array.isArray(parsed.features) || !parsed.contract) {
 		throw new Error(`Orchestrator did not return a usable plan. Raw:\n${text.slice(0, 2000)}`);
 	}
@@ -115,7 +136,7 @@ Produce the plan + validation contract now. At most ${config.maxFeatures} featur
 		architectureNote: parsed.architectureNote ?? "",
 		// Only keep something that is actually a flowchart — a model that answered in prose here
 		// would otherwise render as a mermaid parse error in the console.
-		architecture: typeof parsed.architecture === "string" && /^\s*(flowchart|graph)\s/.test(parsed.architecture) ? parsed.architecture.trim() : undefined,
+		architecture: parseArchitecture(parsed.architecture),
 		features: parsed.features.map((f, i) => ({
 			id: f.id ?? `f${i + 1}`,
 			title: f.title ?? `Feature ${i + 1}`,

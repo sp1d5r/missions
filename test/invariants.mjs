@@ -10,6 +10,9 @@ const names = (vs) => vs.map((v) => v.invariant).sort();
 
 const a = (id, extra = {}) => ({ id, statement: `s-${id}`, method: { type: "bash-command", command: "true", expectedExitCode: 0 }, ...extra });
 const f = (id, assertionIds) => ({ id, title: `t-${id}`, description: `d-${id}`, assertionIds });
+// A plan the harness considers complete draws the part of the system it touches. Kept in one
+// place so a case that cares about something else does not have to restate it.
+const ARCH = 'flowchart LR\n  A["src/a.ts"] --> B["src/b.ts"]:::touched\n  classDef touched stroke:#d08b28';
 
 // ---- checkPlan --------------------------------------------------------------
 
@@ -19,7 +22,16 @@ t("empty contract blocks",
 	["contract.non-empty"]);
 
 t("healthy plan is silent",
-	checkPlan({ summary: "", architectureNote: "", features: [f("f1", ["a1"])], contract: { assertions: [a("a1")] } }),
+	checkPlan({ summary: "", architectureNote: "", architecture: ARCH, features: [f("f1", ["a1"])], contract: { assertions: [a("a1")] } }),
+	[]);
+
+// A plan that draws nothing is worse but still runnable, so it warns rather than blocks.
+t("plan with no diagram warns, never blocks",
+	names(checkPlan({ summary: "", architectureNote: "", features: [f("f1", ["a1"])], contract: { assertions: [a("a1")] } })),
+	["plan.architecture"]);
+
+t("a missing diagram never blocks the run",
+	names(blocking(checkPlan({ summary: "", architectureNote: "", features: [f("f1", ["a1"])], contract: { assertions: [a("a1")] } }))),
 	[]);
 
 t("hallucinated method type blocks",
@@ -41,7 +53,7 @@ t("duplicate assertion ids block",
 	["assertion.id-unique"]);
 
 t("unowned assertion only warns (--max-features truncates legitimately)",
-	names(warnings(checkPlan({ summary: "", architectureNote: "", features: [f("f1", ["a1"])], contract: { assertions: [a("a1"), a("a2")] } }))),
+	names(warnings(checkPlan({ summary: "", architectureNote: "", architecture: ARCH, features: [f("f1", ["a1"])], contract: { assertions: [a("a1"), a("a2")] } }))),
 	["assertion.owned"]);
 
 // ---- checkBoundary ----------------------------------------------------------

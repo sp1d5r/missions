@@ -56,11 +56,14 @@ export function MissionDiagrams({ state }: { state: MissionState }) {
 						</div>
 					</figure>
 				) : (
-					// Said plainly rather than silently omitted: the absence is a fact about the
-					// plan, and every mission planned before this existed will show it.
+					// State the fact, not a guess at its cause. This used to say the mission was
+					// planned before the harness asked for a diagram — something the console cannot
+					// know, and plainly false for any mission whose planner simply skipped the
+					// field. It told the reader to expect better next time when the real answer was
+					// that this plan was worse than it should have been. `plan.architecture` in
+					// invariants.ts now warns at plan time, so the gap is reported where it happens.
 					<div className="faint" style={{ padding: "2px 0 10px" }}>
-						This mission was planned before the harness asked for a system diagram. New
-						missions draw one.
+						No system diagram — this mission's planner did not draw one.
 					</div>
 				)}
 

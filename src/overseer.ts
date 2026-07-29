@@ -10,7 +10,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
-import { createReadOnlyTools } from "@earendil-works/pi-coding-agent";
+import { createBashTool, createReadOnlyTools } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
 import { basename } from "node:path";
 import chalk from "chalk";
@@ -306,14 +306,41 @@ export function createOverseerSession(outDir: string, options: OverseerOptions =
 		for (const l of listeners) l(text);
 	};
 
+	/**
+	 * Read and run, in the worktree if it is still there and the target repo once it is not.
+	 *
+	 * Returns nothing at all only when neither path exists, which means there is genuinely no
+	 * tree to look at — better to have no tool than one pointed at a directory that is gone.
+	 */
+	function repoTools(worktreePath: string | undefined, targetCwd: string) {
+		const cwd = worktreePath && existsSync(worktreePath) ? worktreePath : targetCwd;
+		if (!cwd || !existsSync(cwd)) return [];
+		return [...createReadOnlyTools(cwd), createBashTool(cwd)];
+	}
+
 	const agent = new Agent({
 		initialState: {
 			systemPrompt,
 			model,
 			thinkingLevel: "off",
-			// Read-only repo tools too: judging whether a worker's approach is sane needs the
-			// codebase, not just the mission's own paperwork.
-			tools: [...workerTools(state.id, outDir), ...(state.worktreePath && existsSync(state.worktreePath) ? createReadOnlyTools(state.worktreePath) : [])],
+			// Repo tools too: judging whether a worker's approach is sane needs the codebase, not
+			// just the mission's own paperwork.
+			//
+			// bash, specifically. Without it the overseer could read source and infer, but could
+			// not answer the questions actually asked of it — has this moved on, does the test
+			// pass now, what does git log say, did that fix land. Asked any of those it replied
+			// that it could not, which is the correct answer for a thing with no way to run
+			// anything and a useless one to receive. A command's output is evidence; a reading of
+			// the source is an inference.
+			//
+			// Read and run, never edit or write: the worker owns the tree and every commit in it,
+			// and the overseer's job is to observe and — through ask_worker / steer_worker — to
+			// ask. An overseer that edits is a second writer on a tree it does not own.
+			//
+			// Falls back to the target repo once the worktree is reclaimed. A finished mission is
+			// exactly when someone opens the overseer to ask what happened, and pointing it at
+			// nothing made it blind at that moment.
+			tools: [...workerTools(state.id, outDir), ...repoTools(state.worktreePath, state.targetCwd)],
 		},
 		streamFn,
 		getApiKey: (provider) => getEnvApiKey(provider),

@@ -90,6 +90,15 @@ export function checkPlan(plan: Plan): Violation[] {
 	}
 	if (!features.length) push("plan.has-features", "block", "the plan has no features, so no work would be dispatched");
 
+	// Drawing the part of the system a mission touches is the planner's job, and it is the only
+	// stage that has read the repo and decided. When it skips the field nothing used to notice, so
+	// the console was left inferring a cause it could not know and telling the reader the mission
+	// predated the feature. A warning, not a block: a missing picture is a worse plan, not an
+	// unsafe one, and refusing to run over it would cost more than it saves.
+	if (!plan.architecture) {
+		push("plan.architecture", "warn", "the plan drew no system diagram — the console will have nothing to show for this mission");
+	}
+
 	for (const id of duplicates(assertions.map((a) => a.id))) {
 		push("assertion.id-unique", "block", `assertion id "${id}" is used more than once — results would overwrite each other`);
 	}
