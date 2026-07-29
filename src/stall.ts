@@ -61,7 +61,7 @@ export function decideStallOrRetry(input: StallInput): StallDecision {
 		return {
 			action: "stall",
 			reason:
-				"The scorecard still does not cover the full contract after a re-validation attempt. " +
+				"The scorecard still does not cover the full contract after a re-validation retry. " +
 				"A human needs to inspect why the assertion count is mismatched.",
 			invariants: slugs,
 		};
