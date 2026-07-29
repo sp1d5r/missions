@@ -1,10 +1,14 @@
 import { execFileSync } from "node:child_process";
+import { statSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { drainFrames, encode, legacySocketPaths, orgPidPath, readOrgPid, removeSocket, writeOrgPid } from "./ipc.js";
 import { createChiefSession, type ChiefSession } from "./chief.js";
 import { renderRun, runRoutine } from "./routine-run.js";
 import { dueRoutines } from "./routines.js";
 import { createChiefRecorder } from "./chieflog.js";
+import { isHarnessStale } from "./mission.js";
 import { registerWorkspace } from "./workspaces.js";
 
 /**
@@ -72,6 +76,21 @@ export async function runDaemon(homeCwd: string, socketPath: string): Promise<vo
 
 	await new Promise<void>((resolveListen) => server.listen(socketPath, resolveListen));
 	writeOrgPid(process.pid);
+
+	// Stale-daemon check: if the build artefacts are newer than when this process started,
+	// the binary has been updated and clients should restart the daemon.
+	try {
+		const daemonStartMs = Date.now();
+		const thisFile = fileURLToPath(import.meta.url);
+		const buildMtimeMs = statSync(thisFile).mtimeMs;
+		if (isHarnessStale(daemonStartMs - 5_000, buildMtimeMs)) {
+			// Note: daemon started AFTER the build, so this is a sign the build was done BEFORE
+			// the daemon started. But if buildMtime is still in the future (race), warn.
+			session.notify("[harness] ⚠ build artefacts are newer than daemon start — run `missions stop && missions` to restart with fresh code");
+		}
+	} catch {
+		/* never block startup */
+	}
 
 	// Standing orders live here rather than in launchd or cron, for one practical
 	// reason: this process already has the environment of the terminal that started

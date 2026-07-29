@@ -30,7 +30,8 @@ npm test
 ```
 
 This runs the full suite: `invariants`, `control`, `lifecycle`, `bootstrap`, `ports`, `seats`,
-`registry`, `setup`, `workers`, and `routines`. All ten exit zero on a fresh checkout.
+`registry`, `setup`, `workers`, `routines`, `stall`, `verdict`, and `needs`. All thirteen exit
+zero on a fresh checkout.
 
 You can also run them individually:
 
@@ -45,6 +46,9 @@ node test/registry.mjs     # mission liveness / stall detection
 node test/setup.mjs        # setup-record scoping
 node test/workers.mjs      # in-process worker steering
 node test/routines.mjs     # routine scheduling and deduplication
+node test/stall.mjs        # stall detection and finalizeStall helpers
+node test/verdict.mjs      # verdict / blocker logic
+node test/needs.mjs        # needs-sentence truncation helpers
 ```
 
 ## Other scripts

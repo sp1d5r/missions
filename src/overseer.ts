@@ -16,6 +16,7 @@ import { basename } from "node:path";
 import chalk from "chalk";
 import { Agent, getEnvApiKey, getModel, streamFn, Type, type AgentEvent, type AgentMessage, type AgentTool } from "./pi.js";
 import { autoRouting } from "./models.js";
+import { resumeMission } from "./mission.js";
 import { StateStore } from "./state.js";
 import type { MissionState } from "./types.js";
 import { workerClient } from "./workers.js";
@@ -118,6 +119,15 @@ and lands in the permanent record of the mission. When you are unsure, ask inste
 
 Every steer is written into the worker's handoff. Make each one specific enough that someone reading
 that record later understands what changed and why.
+
+WHEN TO RESUME
+reach for resume_mission when:
+- a worker has just committed a fix that directly addresses failing assertions, AND the milestone is
+  stalled or has hit its ceiling/budget — resume_mission re-validates and continues the run.
+- the operator has manually resolved a blocking condition (e.g. fixed a dependency, merged a needed
+  schema change) and wants the harness to pick up where it left off.
+- the verdict is budget-exhausted or max-milestones and you believe the remaining work is worth additional spend.
+Do NOT call resume_mission while workers are still running, or when the verdict is already 'passed'.
 
 ANSWERING
 - Be concise and direct. The human can see the board and timeline alongside this chat.
@@ -273,7 +283,47 @@ function workerTools(missionId: string, outDir: string): AgentTool[] {
 		},
 	} as unknown as AgentTool;
 
-	return [statusTool, listTool, tailTool, diffTool, askTool, steerTool];
+	const resumeTool = {
+		name: "resume_mission",
+		label: "resume",
+		description:
+			"Resume this stalled, budget-exhausted, or ceiling-hit mission. " +
+			"Call this after you have committed a fix that addresses one or more failing assertions, or after the operator has resolved the stall condition. " +
+			"Returns { refused, reason, remedy, before, after, verdict } where refused=true means a guard blocked the resume (see reason+remedy). " +
+			"Do NOT call this while workers are still running.",
+		parameters: Type.Object({
+			budget: Type.Optional(Type.Number({ description: "Additional budget in USD to add on top of what was spent. Default: 10." })),
+			maxMilestones: Type.Optional(Type.Number({ description: "New milestone ceiling (must be > current milestones completed). Default: current+3." })),
+		}),
+		async execute(_id: string, p: { budget?: number; maxMilestones?: number }) {
+			const store = StateStore.load(outDir);
+			if (!store) return text({ refused: true, reason: "unreadable-state", remedy: "state.json missing or unreadable" });
+			const before = store.state.scoreCard
+				? `${store.state.scoreCard.assertionsPassed}/${store.state.scoreCard.assertionsTotal} assertions, ${store.state.scoreCard.bugs.length} bug(s)`
+				: "no scorecard";
+			try {
+				const result = await resumeMission(outDir, { budget: p.budget, maxMilestones: p.maxMilestones });
+				const sc = result.scoreCard;
+				const after = sc
+					? `${sc.assertionsPassed}/${sc.assertionsTotal} assertions, ${sc.bugs.length} bug(s)`
+					: "no scorecard";
+				return text({ refused: false, before, after, verdict: result.finalVerdict ?? "unknown" });
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				// Parse structured reason/remedy from the error message if possible.
+				const reasonMatch = /Cannot resume: (\S+)\./.exec(msg);
+				const remedyMatch = /Cannot resume: [^.]+\.\s*(.+)$/.exec(msg);
+				return text({
+					refused: true,
+					reason: reasonMatch?.[1] ?? msg,
+					remedy: remedyMatch?.[1] ?? "see error details",
+					before,
+				});
+			}
+		},
+	} as unknown as AgentTool;
+
+	return [statusTool, listTool, tailTool, diffTool, askTool, steerTool, resumeTool];
 }
 
 export interface OverseerOptions {

@@ -1,5 +1,5 @@
-export { runMission } from "./mission.js";
-export type { MissionEvent } from "./mission.js";
+export { runMission, resumeMission, decideResume, isHarnessStale } from "./mission.js";
+export type { MissionEvent, ResumeOpts, ResumeProbes, DecideResumeResult, ResumeMissionOpts } from "./mission.js";
 export { planMission } from "./orchestrator.js";
 export { runWorker } from "./worker.js";
 export { runValidators } from "./validators/index.js";

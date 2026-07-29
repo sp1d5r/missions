@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { getEnvApiKey } from "./pi.js";
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { basename, resolve } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { basename, dirname, join, resolve } from "node:path";
 import chalk from "chalk";
 import { runClient } from "./client.js";
 import { cmuxOpenBrowser, cmuxOpenDiff, hasCmuxPassword, insideCmux } from "./cmux.js";
@@ -11,7 +12,7 @@ import { generateBriefing } from "./briefing.js";
 import { generateChangelog } from "./changelog.js";
 import { missionDebrief, renderBriefing } from "./diagram-text.js";
 import { runDaemon, stopOrg } from "./daemon.js";
-import { runMission } from "./mission.js";
+import { runMission, resumeMission, isHarnessStale } from "./mission.js";
 import { forgetWorkspace, listWorkspaces, registerWorkspace } from "./workspaces.js";
 import { deepClean, humanBytes, renderSweep, sweep } from "./lifecycle.js";
 import { renderRun, runRoutine } from "./routine-run.js";
@@ -115,6 +116,7 @@ Usage:
   missions stop                                  Stop the org (running missions are abandoned)
   missions gc [--target <repo>] [--dry-run] [--deep]  Reclaim worktrees from finished missions; delete merged branches
   missions peek [--target <repo>]                Read-only board TUI, no chief attached (quick glance)
+  missions resume <runId> [--budget <usd>] [--max-milestones <n>] [--out <dir>]   Resume a stalled/exhausted/ceiling mission
   missions view <runId> [--out <dir>]            Per-mission TUI: timeline · log tail · overseer chat
   missions attach [--target <repo>]              Text-only chief chat, no board pane (dumb terminals)
   missions run --target <repo> --goal "..." [--rfc @file|text] [flags]   Non-interactive single mission
@@ -421,6 +423,61 @@ async function main(): Promise<void> {
 		process.stdout.write(`${missionDebrief(s, process.stdout.columns ?? 92).join("\n")}\n`);
 		process.stdout.write(chalk.dim(`  ${s.id} · ${s.status}\n`));
 		if (s.reportPath) process.stdout.write(chalk.dim(`  report: ${s.reportPath}\n\n`));
+		// Stale daemon check.
+		try {
+			const thisFile = fileURLToPath(import.meta.url);
+			const buildMtime = statSync(thisFile).mtimeMs;
+			const { readOrgPid } = await import("./ipc.js");
+			const pid = readOrgPid();
+			if (pid) {
+				// Approximate daemon start as current build time (conservative check).
+				if (isHarnessStale(buildMtime - 60_000, buildMtime)) {
+					process.stdout.write(chalk.yellow("  ⚠ daemon may be running stale code — run `missions stop && missions` to restart\n"));
+				}
+			}
+		} catch {
+			/* stale check is advisory, never fatal */
+		}
+		return;
+	}
+
+	if (f.cmd === "resume") {
+		const runIdArg = f.args[0] ?? f.out;
+		if (!runIdArg) throw new Error("resume requires a runId or --out <mission-out-dir>");
+
+		// Resolve runId to outDir (same logic as view).
+		let outDir: string | undefined;
+		if (existsSync(resolve(runIdArg, "state.json"))) {
+			outDir = resolve(runIdArg);
+		} else {
+			const { resolveRunId } = await import("./mission-view.js");
+			const resolved = resolveRunId(runIdArg);
+			if (resolved) outDir = resolved.outDir;
+		}
+		if (!outDir) {
+			process.stderr.write(chalk.red(`Cannot resolve run "${runIdArg}" — pass a full outDir or a unique runId prefix.\n`));
+			process.exit(1);
+		}
+
+		if (!getEnvApiKey("anthropic")) {
+			process.stderr.write(`${chalk.red("Missing ANTHROPIC_API_KEY")}\n`);
+			process.exit(1);
+		}
+
+		const opts: import("./mission.js").ResumeMissionOpts = {};
+		if (f.budget !== 8) opts.budget = f.budget; // only set if explicitly passed
+		if (f.maxMilestones !== 3) opts.maxMilestones = f.maxMilestones; // only set if explicitly passed
+
+		process.stdout.write(`${chalk.bold("resume")} → ${chalk.dim(outDir)}\n\n`);
+		const state = await resumeMission(outDir, opts, (e) => {
+			if (e.type === "status") process.stdout.write(`${chalk.cyan("▶")} ${chalk.bold(e.status)}\n`);
+			else process.stdout.write(`  ${chalk.dim(e.message)}\n`);
+		});
+		process.stdout.write(`${missionDebrief(state, process.stdout.columns ?? 92).join("\n")}\n`);
+		if (state.reportPath) {
+			process.stdout.write(`  ${chalk.bold("report:")} ${state.reportPath}\n`);
+			presentReview(state.reportPath, state.targetCwd, state.baseSha, f.open);
+		}
 		return;
 	}
 
