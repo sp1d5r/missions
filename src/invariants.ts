@@ -175,27 +175,34 @@ export function checkBoundary(facts: BoundaryFacts): Violation[] {
 	const push = (invariant: string, severity: Severity, detail: string) => v.push({ invariant, severity, detail });
 
 	const { assertions, scoreCard, handoffs, verdict, corrections, dispatchedFeatureIds } = facts;
-	const failing = assertions.filter((a) => !a.passed);
+	// Pending assertions (owning feature not yet dispatched) are excluded from the failing set
+	// for boundary decisions, mirroring what mission.ts computes for the triage/stall path.
+	const failing = assertions.filter((a) => !a.pending && !a.passed);
 	const blockingBugs = scoreCard.bugs.filter((b) => b.severity === "critical" || b.severity === "high");
 	const issues = handoffs.flatMap((h) => h.issues);
 	const unruled = issues.filter((i) => !i.disposition);
 
 	// The score card must be scoring THIS contract. A mismatch means assertions were
 	// added, dropped, or silently skipped between planning and validation.
-	if (scoreCard.assertionsTotal !== assertions.length) {
+	// Pending assertions (owning feature not yet dispatched) are intentionally excluded
+	// from assertionsTotal — account for them here to avoid a spurious violation.
+	const pendingCount = scoreCard.pendingAssertionIds?.length ?? 0;
+	if (scoreCard.assertionsTotal + pendingCount !== assertions.length) {
 		push(
 			"scorecard.covers-contract",
 			"block",
-			`score card counted ${scoreCard.assertionsTotal} assertion(s) but the contract has ${assertions.length}`,
+			`score card counted ${scoreCard.assertionsTotal} assertion(s) (${pendingCount} pending) but the contract has ${assertions.length}`,
 		);
 	}
 
 	// The orchestrator does not get to declare victory over the evidence.
-	if (verdict === "passed" && (failing.length || blockingBugs.length || unruled.length)) {
+	// Pending assertions also block a pass — the contract is not fully evaluated yet.
+	const pendingAssertions = assertions.filter((a) => a.pending);
+	if (verdict === "passed" && (failing.length || blockingBugs.length || unruled.length || pendingAssertions.length)) {
 		push(
 			"verdict.evidence-backed",
 			"block",
-			`orchestrator returned "passed" with ${failing.length} failing assertion(s), ${blockingBugs.length} blocking bug(s), ${unruled.length} unruled issue(s)`,
+			`orchestrator returned "passed" with ${failing.length} failing assertion(s), ${pendingAssertions.length} pending assertion(s), ${blockingBugs.length} blocking bug(s), ${unruled.length} unruled issue(s)`,
 		);
 	}
 
@@ -267,6 +274,9 @@ export function checkBoundary(facts: BoundaryFacts): Violation[] {
 
 	const contractIds = new Set(assertions.map((a) => a.id));
 	const failingIds = new Set(failing.map((a) => a.id));
+	// Pending assertions are not in failingIds but are also not passed — a correction
+	// targeting a pending assertion is legitimate, not "redoing finished work".
+	const pendingIds = new Set(pendingAssertions.map((a) => a.id));
 	const alreadyDispatched = new Set(dispatchedFeatureIds);
 	for (const c of corrections) {
 		// A correction that resolves nothing burns a milestone for free.
@@ -279,7 +289,9 @@ export function checkBoundary(facts: BoundaryFacts): Violation[] {
 		if (alreadyDispatched.has(c.id)) {
 			push("correction.id-fresh", "block", `${c.id} reuses the id of a feature already dispatched this mission`);
 		}
-		const targets = (c.assertionIds ?? []).filter((id) => failingIds.has(id));
+		// A correction targeting only passing assertions may be redoing finished work.
+		// Pending assertions are not "already passing" — exclude them from the check.
+		const targets = (c.assertionIds ?? []).filter((id) => failingIds.has(id) || pendingIds.has(id));
 		if ((c.assertionIds?.length ?? 0) > 0 && targets.length === 0) {
 			push("correction.targets-failure", "warn", `${c.id} only targets assertions that already pass — it may be redoing finished work`);
 		}

@@ -17,12 +17,40 @@ export interface RunValidatorsOptions {
 	/** The main checkout. Commands reaching back into it are refused, not run. */
 	foreignRoot?: string;
 	onProgress?: (msg: string) => void;
+	/**
+	 * Every feature id dispatched so far (plan + corrections, in dispatch order).
+	 * Assertions whose owning feature is NOT in this set are classified as pending:
+	 * excluded from the failing set, but still block a CLEAN verdict.
+	 * When absent, all assertions are validated normally (existing behaviour).
+	 */
+	dispatchedFeatureIds?: string[];
 }
 
 export async function runValidators(options: RunValidatorsOptions): Promise<ScoreCard> {
-	const { cwd, plan, bugSpotterModel, diff, intent, extraCheckCommand, env, foreignRoot, onProgress } = options;
+	const { cwd, plan, bugSpotterModel, diff, intent, extraCheckCommand, env, foreignRoot, onProgress, dispatchedFeatureIds } = options;
 	const checks: CheckResult[] = [];
 	let costUsd = 0;
+
+	// Build a map from assertion id → the feature that owns it (via feature.assertionIds).
+	// An assertion with no owning feature in the plan is treated as always dispatched.
+	const assertionOwner = new Map<string, string>(); // assertionId → featureId
+	for (const f of plan.features) {
+		for (const aid of f.assertionIds) {
+			assertionOwner.set(aid, f.id);
+		}
+	}
+
+	// Determine which assertions are pending (owner not yet dispatched).
+	// Only active when dispatchedFeatureIds is provided. An assertion with no
+	// registered owner (e.g. added at a boundary) is never pending.
+	const dispatched = dispatchedFeatureIds ? new Set(dispatchedFeatureIds) : null;
+	const isPending = (assertionId: string): boolean => {
+		if (!dispatched) return false;
+		const owner = assertionOwner.get(assertionId);
+		// No owner → treat as dispatched (keep existing behaviour).
+		if (owner === undefined) return false;
+		return !dispatched.has(owner);
+	};
 
 	// 1. Adversarial bug-spotter over the whole diff (drives code-review assertions too).
 	onProgress?.("bug-spotter reviewing diff");
@@ -38,6 +66,16 @@ export async function runValidators(options: RunValidatorsOptions): Promise<Scor
 
 	// 3. Per-assertion validation.
 	for (const a of plan.contract.assertions) {
+		// If the owning feature has not been dispatched yet, mark as pending and skip.
+		if (isPending(a.id)) {
+			a.pending = true;
+			a.passed = undefined; // not run — neither passed nor failed
+			a.evidence = "PENDING — owning feature has not been dispatched in any milestone yet";
+			onProgress?.(`assert ${a.id}: pending (feature not dispatched)`);
+			continue;
+		}
+		// Clear any stale pending flag from a previous milestone.
+		a.pending = undefined;
 		if (a.method.type === "bash-command") {
 			onProgress?.(`assert ${a.id}: ${a.method.command}`);
 			const r = runCheck({
@@ -76,13 +114,19 @@ export async function runValidators(options: RunValidatorsOptions): Promise<Scor
 		}
 	}
 
-	const assertionsTotal = plan.contract.assertions.length;
-	const assertionsPassed = plan.contract.assertions.filter((a) => a.passed).length;
+	// Pending assertions are excluded from the pass/fail totals so they do not
+	// inflate assertionsTotal or artificially deflate assertionsPassed.
+	const nonPendingAssertions = plan.contract.assertions.filter((a) => !a.pending);
+	const assertionsTotal = nonPendingAssertions.length;
+	const assertionsPassed = nonPendingAssertions.filter((a) => a.passed).length;
 
-	// Build per-strength breakdown.
-	const strengthBreakdown = buildStrengthBreakdown(plan.contract.assertions);
+	// Build per-strength breakdown (pending excluded).
+	const strengthBreakdown = buildStrengthBreakdown(nonPendingAssertions);
 
-	return { assertionsPassed, assertionsTotal, checks, bugs, costUsd, strengthBreakdown };
+	const pendingIds = plan.contract.assertions.filter((a) => a.pending).map((a) => a.id);
+	const pendingAssertionIds = pendingIds.length > 0 ? pendingIds : undefined;
+
+	return { assertionsPassed, assertionsTotal, checks, bugs, costUsd, strengthBreakdown, pendingAssertionIds };
 }
 
 function mark(a: Assertion, passed: boolean, evidence: string): void {

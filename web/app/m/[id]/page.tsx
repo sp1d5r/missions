@@ -41,6 +41,9 @@ export default async function Mission({ params }: { params: Promise<{ id: string
 				<div style={{ textAlign: "right" }}>
 					<Tag tone={toneFor(rec)}>{rec.done ? (rec.verdict ?? rec.status) : rec.stalled ? "stalled" : rec.status}</Tag>
 					{rec.needsYou && <Tag tone="warn">needs you</Tag>}
+					{rec.needs && (
+						<div className="dim" style={{ marginTop: 4, fontSize: 11 }}>{rec.needs}</div>
+					)}
 				</div>
 			</ThreadHead>
 

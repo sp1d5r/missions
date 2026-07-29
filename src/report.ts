@@ -200,7 +200,7 @@ export function generateReport(args: {
     ${assertions
 			.map(
 				(a) => `<tr><td class="mono">${esc(a.id)}</td><td>${esc(a.statement)}</td>
-      <td class="${a.passed ? "dim" : "exit-bad"}">${esc(a.evidence ?? "—")}</td></tr>`,
+      <td class="${a.pending ? "faint" : a.passed ? "dim" : "exit-bad"}">${esc(a.evidence ?? "—")}</td></tr>`,
 			)
 			.join("")}
   </tbody></table></div>

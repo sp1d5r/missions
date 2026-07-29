@@ -53,6 +53,9 @@ export default async function Board({
 									<span className="dim">
 										— {r.repoName}: {r.goal}
 									</span>
+									{r.needs && (
+										<span className="dim"> — {r.needs}</span>
+									)}
 								</li>
 							))}
 						</ul>

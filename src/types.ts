@@ -52,6 +52,11 @@ export interface Assertion {
 	/** Filled in by validators. */
 	passed?: boolean;
 	evidence?: string;
+	/**
+	 * Set by the validator when the assertion's owning feature has not been dispatched yet.
+	 * Pending assertions are excluded from the failing set but still block a CLEAN verdict.
+	 */
+	pending?: boolean;
 }
 
 export interface ValidationContract {
@@ -137,6 +142,12 @@ export interface ScoreCard {
 	costUsd: number;
 	/** Per-strength breakdown of assertions. Present when the plan has strength annotations. */
 	strengthBreakdown?: StrengthBreakdown;
+	/**
+	 * Assertion ids whose owning feature has not been dispatched in any milestone so far.
+	 * Excluded from the failing set used by triage and stall decisions; still block a CLEAN verdict.
+	 * Absent when there are no pending assertions.
+	 */
+	pendingAssertionIds?: string[];
 }
 
 export interface CommitRecord {

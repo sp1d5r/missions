@@ -1,5 +1,6 @@
 /**
- * Unit tests for src/stall.ts (compiled to dist/stall.js).
+ * Unit tests for src/stall.ts (compiled to dist/stall.js) and the
+ * finalizeStall choke point in src/mission.ts (compiled to dist/mission.js).
  *
  * Follows the same convention as test/invariants.mjs:
  *   - import from dist/
@@ -8,6 +9,7 @@
  */
 
 import { decideStallOrRetry } from "../dist/stall.js";
+import { finalizeStall } from "../dist/mission.js";
 
 let failures = 0;
 
@@ -205,6 +207,103 @@ for (const slug of allBlockers) {
 		assert(result.action !== "re-validate", `re-validate must not be returned when retriedThisMilestone=true`);
 	});
 }
+
+// ---- finalizeStall: terminal-stall invariant (non-empty stallReason) -------
+//
+// These tests cover the single choke point in mission.ts that guarantees every
+// terminal finalVerdict==='stalled' path produces a non-empty stallReason.
+
+/** Minimal MissionState stub sufficient for finalizeStall. */
+function makeState(stallReason) {
+	return { stallReason };
+}
+
+// (a) An explicit stallReason survives unchanged.
+check("finalizeStall: explicit reason is preserved", () => {
+	const state = makeState("Something went wrong with the boundary check.");
+	const result = finalizeStall(state, state.stallReason, 3, ["a1", "a2"]);
+	assert(result === "Something went wrong with the boundary check.", `expected original reason, got: ${result}`);
+	assert(state.stallReason === "Something went wrong with the boundary check.", "state.stallReason should match");
+});
+
+check("finalizeStall: explicit reason passed directly survives unchanged", () => {
+	const state = makeState(undefined);
+	const reason = "The orchestrator did not offer corrections. A human must decide.";
+	const result = finalizeStall(state, reason, 2, ["a3"]);
+	assert(result === reason, `expected reason unchanged, got: ${result}`);
+	assert(state.stallReason === reason, "state.stallReason should be set to provided reason");
+});
+
+// (b) An unset stallReason gets the fallback.
+check("finalizeStall: undefined reason gets fallback", () => {
+	const state = makeState(undefined);
+	const result = finalizeStall(state, undefined, 5, ["a1", "a3"]);
+	// fallback must be non-empty
+	assert(result.trim().length > 0, "fallback must be non-empty");
+	assert(state.stallReason === result, "state.stallReason must be set to fallback");
+});
+
+check("finalizeStall: empty string reason gets fallback", () => {
+	const state = makeState("");
+	const result = finalizeStall(state, "", 2, ["a2"]);
+	// fallback must be non-empty
+	assert(result.trim().length > 0, "fallback must be non-empty when reason is empty string");
+	assert(state.stallReason === result, "state.stallReason must be set to fallback");
+});
+
+check("finalizeStall: whitespace-only reason gets fallback", () => {
+	const state = makeState("   ");
+	const result = finalizeStall(state, "   ", 1, ["a5"]);
+	assert(result.trim().length > 0, "fallback must be non-empty when reason is whitespace");
+	assert(state.stallReason === result, "state.stallReason must be set to fallback");
+});
+
+// (c) The fallback is non-empty and contains milestone count and any known failing ids.
+check("finalizeStall fallback: contains milestone count", () => {
+	const state = makeState(undefined);
+	const result = finalizeStall(state, undefined, 7, ["a1", "a3"]);
+	// must mention the number of milestones
+	assert(result.includes("7"), `fallback must contain milestone count (7), got: ${result}`);
+});
+
+check("finalizeStall fallback: contains failing assertion ids", () => {
+	const state = makeState(undefined);
+	const result = finalizeStall(state, undefined, 3, ["a1", "a3"]);
+	assert(result.includes("a1"), `fallback must contain failing id 'a1', got: ${result}`);
+	assert(result.includes("a3"), `fallback must contain failing id 'a3', got: ${result}`);
+});
+
+check("finalizeStall fallback: non-empty when no failing ids", () => {
+	const state = makeState(undefined);
+	const result = finalizeStall(state, undefined, 2, []);
+	assert(result.trim().length > 0, "fallback must be non-empty even with empty failing ids");
+	assert(result.includes("2"), `fallback must contain milestone count (2), got: ${result}`);
+});
+
+check("finalizeStall fallback: single milestone uses singular form or contains count", () => {
+	const state = makeState(undefined);
+	const result = finalizeStall(state, undefined, 1, ["a1"]);
+	assert(result.trim().length > 0, "fallback must be non-empty");
+	assert(result.includes("1"), `fallback must contain milestone count (1), got: ${result}`);
+	assert(result.includes("a1"), `fallback must contain failing id 'a1', got: ${result}`);
+});
+
+check("finalizeStall: state.stallReason is always non-empty after call for every stall path", () => {
+	// Simulate boundary-violation stall with a provided reason
+	const state1 = makeState(undefined);
+	finalizeStall(state1, "Boundary violated due to invariant scorecard.covers-contract.", 2, ["a1"]);
+	assert(state1.stallReason && state1.stallReason.trim().length > 0, "stallReason must be non-empty after boundary stall");
+
+	// Simulate no-corrections stall with a provided reason
+	const state2 = makeState(undefined);
+	finalizeStall(state2, "The orchestrator did not offer any corrections.", 1, ["a2", "a4"]);
+	assert(state2.stallReason && state2.stallReason.trim().length > 0, "stallReason must be non-empty after no-corrections stall");
+
+	// Simulate unexpected stall (empty queue, no reason provided)
+	const state3 = makeState(undefined);
+	finalizeStall(state3, undefined, 0, []);
+	assert(state3.stallReason && state3.stallReason.trim().length > 0, "stallReason must be non-empty after unexpected stall");
+});
 
 // ---- Summary ----------------------------------------------------------------
 
