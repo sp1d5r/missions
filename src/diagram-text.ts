@@ -15,6 +15,7 @@ import chalk from "chalk";
 import type { Briefing, Verdict } from "./briefing.js";
 import { codename } from "./theme.js";
 import type { MilestoneRecord, MilestoneVerdict, MissionState } from "./types.js";
+import { annotateVerdict } from "./validators/checks.js";
 
 type Paint = (s: string) => string;
 
@@ -176,11 +177,13 @@ export function missionDebrief(state: MissionState, width = 92): string[] {
 	const crashed = state.status === "failed";
 	const sc = state.scoreCard;
 
+	const baseVerdict = clean ? "CLEAN" : `NEEDS YOU${state.finalVerdict ? ` · ${state.finalVerdict}` : ""}`;
+	const annotatedVerdict = crashed ? "CRASHED" : annotateVerdict(baseVerdict, sc);
 	const headline = crashed
-		? chalk.red("CRASHED")
+		? chalk.red(annotatedVerdict)
 		: clean
-			? chalk.green("CLEAN · safe to merge")
-			: chalk.yellow(`NEEDS YOU${state.finalVerdict ? ` · ${state.finalVerdict}` : ""}`);
+			? chalk.green(annotatedVerdict)
+			: chalk.yellow(annotatedVerdict);
 
 	const body: string[] = [];
 	body.push(`${chalk.bold(name)}  ${fit(state.goal, inner - name.length - 4)}`);

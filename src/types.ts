@@ -371,6 +371,12 @@ export interface MissionState {
 	log: string[];
 	/** Structured event log for the timeline pane; appended alongside mission.log. */
 	events?: MissionEvent[];
+	/**
+	 * Human-readable debrief assembled from state at end-of-run: summarises commits, handoffs,
+	 * leftUndone, issues/dispositions, and scoreCard strength. Must not use unqualified success
+	 * language when the strength breakdown is existence-only.
+	 */
+	debrief?: string;
 }
 
 /** Standup carries intent across days. */

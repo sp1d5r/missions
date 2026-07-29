@@ -520,6 +520,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 
 		store.state.finalVerdict = verdict;
 		store.state.outcome = verdict === "passed" ? "clean" : "needs-review";
+		store.state.debrief = buildDebrief(store.state, scoreCard);
 		store.save();
 
 		// 3. Report.
@@ -572,6 +573,63 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 	}
 
 	return store.state;
+}
+
+/**
+ * Assemble a deterministic, grounded debrief from data already in state.
+ * Must not use unqualified success language when the strength breakdown is existence-only.
+ */
+function buildDebrief(state: MissionState, scoreCard: ScoreCard | undefined): string {
+	const milestones = state.milestones ?? [];
+	const handoffs = state.handoffs ?? [];
+	const commits = state.commits ?? [];
+	const bd = scoreCard?.strengthBreakdown;
+
+	const behaviouralPassed = bd?.behavioural?.passed ?? 0;
+	const behaviouralTotal = bd?.behavioural?.total ?? 0;
+	const existenceOnly = behaviouralPassed === 0;
+
+	const lines: string[] = [];
+
+	// --- verdict line ---
+	const baseVerdict = state.outcome === "clean" ? "CLEAN" : `NEEDS YOU (${state.finalVerdict ?? "unknown"})`;
+	const annotated = annotateVerdict(baseVerdict, scoreCard);
+	lines.push(`Verdict: ${annotated}`);
+
+	// --- score summary ---
+	if (scoreCard) {
+		const strengthNote = existenceOnly
+			? "assertion strength: existence-only (no behavioural assertion executed the feature)"
+			: behaviouralPassed < behaviouralTotal
+				? `assertion strength: ${behaviouralPassed} of ${behaviouralTotal} behavioural assertions passed`
+				: `assertion strength: all ${behaviouralTotal} behavioural assertion(s) passed`;
+		lines.push(`Assertions: ${scoreCard.assertionsPassed}/${scoreCard.assertionsTotal} passed · ${scoreCard.bugs.length} bug(s) flagged · ${strengthNote}`);
+	}
+
+	// --- milestones and commits ---
+	lines.push(`Milestones: ${milestones.length} · Commits: ${commits.length} · Cost: $${state.costUsd.toFixed(2)}`);
+
+	if (commits.length) {
+		lines.push(`Commits: ${commits.map((c) => `${c.sha.slice(0, 8)} ${c.message}`).join("; ")}`);
+	}
+
+	// --- handoff summary ---
+	const leftUndone = handoffs.flatMap((h) => h.leftUndone);
+	if (leftUndone.length) {
+		lines.push(`Left undone: ${leftUndone.join("; ")}`);
+	}
+
+	const issues = handoffs.flatMap((h) => h.issues);
+	const unruled = issues.filter((i) => !i.disposition);
+	const ruled = issues.filter((i) => i.disposition);
+	if (unruled.length) {
+		lines.push(`Unruled issues (${unruled.length}): ${unruled.map((i) => i.summary).join("; ")}`);
+	}
+	if (ruled.length) {
+		lines.push(`Ruled issues: ${ruled.map((i) => `${i.summary} [${i.disposition}]`).join("; ")}`);
+	}
+
+	return lines.join("\n");
 }
 
 /** Stamp the orchestrator's dispositions onto the issues they refer to. Matches on summary. */

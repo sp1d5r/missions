@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { contractMapSvg, mermaidSource, missionFlowSvg } from "./diagram.js";
 import { codename, esc, page, statStrip, tag, type Tone } from "./theme.js";
 import type { BugFinding, CommitRecord, Handoff, MilestoneRecord, MilestoneVerdict, MissionState, Plan, ScoreCard, StrengthBreakdown } from "./types.js";
+import { annotateVerdict } from "./validators/checks.js";
 
 const SEV_TONE: Record<string, Tone> = {
 	critical: "bad",
@@ -161,7 +162,7 @@ export function generateReport(args: {
   <h1>${esc(name)} — ${esc(state.goal)}</h1>
   <div class="faint mono">${esc(state.branch)} · ${esc(state.status)}</div>
   <div style="margin-top:8px">
-    ${clean ? tag("ok", "clean · safe to merge") : tag(state.status === "failed" ? "bad" : "warn", `needs you${state.finalVerdict ? ` · ${state.finalVerdict}` : ""}`)}
+    ${clean ? tag("ok", annotateVerdict("CLEAN", scoreCard)) : tag(state.status === "failed" ? "bad" : "warn", `needs you${state.finalVerdict ? ` · ${state.finalVerdict}` : ""}`)}
   </div>
 
   ${statStrip([
@@ -171,6 +172,8 @@ export function generateReport(args: {
 		{ value: String(state.commits.length), label: "commits" },
 		{ value: `$${state.costUsd.toFixed(2)}`, label: "spent" },
 	])}
+
+  ${state.debrief ? `<div class="panel" style="margin-top:10px"><div class="label">debrief</div><pre style="white-space:pre-wrap;margin-top:6px;font-size:0.92em">${esc(state.debrief)}</pre></div>` : ""}
 
   ${scoreCard?.strengthBreakdown ? strengthBreakdownPanel(scoreCard.strengthBreakdown) : ""}
 
