@@ -6,12 +6,16 @@ import { useState } from "react";
 type Action = "clear" | "merge" | "steer";
 
 /**
- * The composer, pinned to the bottom of the thread.
+ * The mission's action bar, pinned to the bottom.
  *
- * Enter sends and Shift+Enter breaks the line, matching both the TUI and every
- * chat app anyone has muscle memory for. The textarea is 16px because anything
- * smaller makes iOS Safari zoom the whole page on focus, and the wrapper
- * carries the safe-area inset so the send button clears the home indicator.
+ * It used to carry a text box too, which posted to the CHIEF and then told you the reply would
+ * turn up in #chief — a question asked on one page answered on another, which in practice meant
+ * nobody read it. Questions now go to the mission's own overseer, in the thread, via MissionChat.
+ * What is left here is the two things that genuinely act on a mission rather than talk about it.
+ *
+ * `steer` survives for a RUNNING mission, where redirecting the work is a real instruction with a
+ * real recipient rather than a question, and it still goes through the chief because the chief is
+ * what owns dispatch.
  */
 export function MissionComposer({
 	id,
@@ -44,7 +48,7 @@ export function MissionComposer({
 			if (!res.ok) {
 				setNote(json.error ?? res.statusText);
 			} else {
-				setNote(action === "clear" ? "cleared" : "sent — the chief replies in #chief");
+				setNote(action === "clear" ? "cleared" : "sent to the chief");
 				if (action === "steer") setText("");
 				router.refresh();
 			}
@@ -65,26 +69,32 @@ export function MissionComposer({
 
 	return (
 		<div className="composer">
-			<textarea
-				value={text}
-				onChange={(e) => setText(e.target.value)}
-				onKeyDown={(e) => {
-					if (e.key === "Enter" && !e.shiftKey) {
-						e.preventDefault();
-						if (text.trim()) void run("steer", text);
-					}
-				}}
-				placeholder={done ? `Ask the chief about ${name}…` : `Steer ${name} while it runs…`}
-			/>
+			{!done && (
+				<>
+					<textarea
+						value={text}
+						onChange={(e) => setText(e.target.value)}
+						onKeyDown={(e) => {
+							if (e.key === "Enter" && !e.shiftKey) {
+								e.preventDefault();
+								if (text.trim()) void run("steer", text);
+							}
+						}}
+						placeholder={`Steer ${name} while it runs…`}
+					/>
+					<div className="row" style={{ marginTop: 8 }}>
+						<button
+							type="button"
+							className="primary"
+							onClick={() => void run("steer", text)}
+							disabled={busy !== null || !text.trim()}
+						>
+							{busy === "steer" ? "sending…" : "steer"}
+						</button>
+					</div>
+				</>
+			)}
 			<div className="row" style={{ marginTop: 8 }}>
-				<button
-					type="button"
-					className="primary"
-					onClick={() => void run("steer", text)}
-					disabled={busy !== null || !text.trim()}
-				>
-					{busy === "steer" ? "sending…" : "send"}
-				</button>
 				<button type="button" onClick={() => void run("clear")} disabled={busy !== null || cleared}>
 					{cleared ? "cleared" : "clear"}
 				</button>

@@ -1,7 +1,8 @@
 import { notFound, redirect } from "next/navigation";
 import { AutoRefresh } from "@/components/auto-refresh";
 import { Denied, Ident, Tag, toneFor, type Tone } from "@/components/chrome";
-import { MissionComposer } from "@/components/mission-actions";
+import { MissionChat } from "@/components/mission-chat";
+import { MissionDiagrams } from "@/components/mission-diagrams";
 import { MissionThread } from "@/components/mission-thread";
 import { Shell, ThreadHead } from "@/components/shell";
 import { mission, record } from "@/lib/data";
@@ -42,6 +43,9 @@ export default async function Mission({ params }: { params: Promise<{ id: string
 					{rec.needsYou && <Tag tone="warn">needs you</Tag>}
 				</div>
 			</ThreadHead>
+
+			{/* Above the scroller, so it stays put while the timeline moves under it. */}
+			{st && <MissionDiagrams state={st} />}
 
 			<div className="thread">
 				{/*
@@ -140,15 +144,16 @@ export default async function Mission({ params }: { params: Promise<{ id: string
 						))}
 					</>
 				)}
-			</div>
 
-			<MissionComposer
-				id={rec.id}
-				name={rec.name}
-				done={rec.done}
-				cleared={Boolean(rec.cleared)}
-				canMutate={mayMutate(op)}
-			/>
+				{/* Questions land here, answered here — see mission-chat.tsx. */}
+				<MissionChat
+					id={rec.id}
+					name={rec.name}
+					done={rec.done}
+					cleared={Boolean(rec.cleared)}
+					canMutate={mayMutate(op)}
+				/>
+			</div>
 		</Shell>
 	);
 }
