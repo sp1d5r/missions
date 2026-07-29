@@ -5,6 +5,7 @@ import { resolveMissionEnv } from "./env.js";
 import { allocatePortBlock, assignPorts } from "./ports.js";
 import { addWorktree, commitAll, diffAgainst, ensureBranch, headSha, isGitRepo } from "./git.js";
 import { blocking, checkBoundary, checkContractRatchet, checkPlan, formatViolations, warnings } from "./invariants.js";
+import { decideStallOrRetry } from "./stall.js";
 import { humanBytes, reclaimWorktree } from "./lifecycle.js";
 import { type CorrectionRuling, planMission, scopeCorrections } from "./orchestrator.js";
 import { readActive, writeActive, repoName } from "./registry.js";
@@ -459,27 +460,86 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 				);
 			}
 
-			const violations = checkBoundary({
-				assertions: plan.contract.assertions,
-				scoreCard,
-				handoffs,
-				verdict: review.verdict,
-				corrections,
-				dispatchedFeatureIds: store.state.features.map((f) => f.id),
-			});
-			for (const w of warnings(violations)) emit(`  ⚠ [${w.invariant}] ${w.detail}`);
-			const blockers = blocking(violations);
-			if (blockers.length) {
-				verdict = "stalled";
-				record.verdict = verdict;
-				record.assessment = `${review.assessment}\n\n[harness] Boundary blocked by ${blockers.length} invariant violation(s):\n${formatViolations(blockers)}`;
-				store.state.milestones.push(record);
-				store.save();
-				emit(`milestone ${m}: STALLED — ${blockers.map((b) => b.invariant).join(", ")} — needs you`);
-				store.appendEvent("milestone_verdict", `milestone ${m}: STALLED`, blockers.map((b) => b.invariant).join(", "), { seat: "lead" });
-				await offerRescue(liveThisMilestone, workCwd, gitExcludes, store, emit, config.rescueWaitMs);
-				break;
-			}
+			// --- Stall/retry decision: at most one re-validate attempt per milestone.
+			let retriedThisMilestone = false;
+
+			// Re-validation loop: runs at most twice (initial + one re-validate).
+			// On re-validate the inner code re-runs the validators and boundary check,
+			// then falls back into this same decision with retriedThisMilestone=true.
+			boundaryLoop: for (;;) {
+				const violations = checkBoundary({
+					assertions: plan.contract.assertions,
+					scoreCard,
+					handoffs,
+					verdict: review.verdict,
+					corrections,
+					dispatchedFeatureIds: store.state.features.map((f) => f.id),
+				});
+				for (const w of warnings(violations)) emit(`  ⚠ [${w.invariant}] ${w.detail}`);
+				const blockers = blocking(violations);
+
+				if (blockers.length) {
+					const decision = decideStallOrRetry({
+						violations: blockers,
+						correctionsOffered: corrections.length > 0,
+						milestonesRemaining: maxMilestones - m,
+						retriedThisMilestone: retriedThisMilestone,
+					});
+
+					if (decision.action === "re-validate") {
+						// Re-run the validators once and retry the boundary check.
+						retriedThisMilestone = true;
+						emit(`  ↺ [scorecard.covers-contract] re-running validation to re-check assertion count`);
+						store.appendEvent("milestone_verdict", `milestone ${m}: re-validating`, "scorecard.covers-contract retry", { seat: "lead" });
+						const diff2 = diffAgainst(workCwd, baseSha);
+						scoreCard = await runValidators({
+							cwd: workCwd,
+							plan,
+							bugSpotterModel: config.routing.bugSpotter,
+							diff: diff2,
+							intent,
+							extraCheckCommand: config.checkCommand ?? setup.verifyCommand,
+							env: missionEnv,
+							foreignRoot: config.targetCwd,
+							onProgress: (msg) => emit(`  validator: ${msg}`),
+						});
+						store.state.scoreCard = scoreCard;
+						store.state.costUsd += scoreCard.costUsd;
+						record.scoreCard = scoreCard;
+						store.save();
+						continue boundaryLoop; // re-check with retriedThisMilestone=true
+					}
+
+					if (decision.action === "scope-corrections") {
+						// verdict.evidence-backed cleared by routing — fall through to corrections.
+						break boundaryLoop;
+					}
+
+					// decision.action === "stall"
+					const stalledBy = decision.invariants.join(", ") || "boundary violation";
+					const whatWasTried = retriedThisMilestone ? " Re-validation was attempted once." : "";
+					const fullReason = `${decision.reason}${whatWasTried}` +
+						(decision.invariants.length > 0 ? ` (${decision.invariants.join(", ")})` : "");
+					store.state.stallReason = fullReason;
+					verdict = "stalled";
+					record.verdict = verdict;
+					record.assessment = `${review.assessment}\n\n[harness] Boundary blocked by ${blockers.length} invariant violation(s):\n${formatViolations(blockers)}`;
+					store.state.milestones.push(record);
+					store.save();
+					emit(`milestone ${m}: STALLED — ${stalledBy} — needs you: ${decision.reason}`);
+					store.appendEvent("milestone_verdict", `milestone ${m}: STALLED`, fullReason, { seat: "lead" });
+					await offerRescue(liveThisMilestone, workCwd, gitExcludes, store, emit, config.rescueWaitMs);
+					break;
+				}
+
+				// No blockers (or cleared after re-validate): proceed to pass/corrections checks.
+				break boundaryLoop;
+			} // end boundaryLoop
+
+			// If we broke out of the loop due to a stall, the milestone already saved and broke
+			// the outer loop. If we are here, boundary is clear (possibly after re-validate).
+			// We must re-check whether the outer loop was broken by the stall above.
+			if (verdict === "stalled") break;
 
 			const stillOpen = handoffs.flatMap((h) => h.issues.filter((i) => !i.disposition));
 
@@ -497,12 +557,18 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 			}
 
 			if (review.verdict !== "needs-corrections" || corrections.length === 0) {
+				// Build a full plain-language sentence for the stall reason (never a bare slug).
+				const noCorReason =
+					corrections.length === 0
+						? "The orchestrator did not offer any corrections to address the failing assertions. A human needs to review the situation and decide what to do next."
+						: `The orchestrator's verdict was not 'needs-corrections' (got '${review.verdict}'), so corrections cannot be scoped. A human needs to review the orchestrator's assessment and resolve the discrepancy.`;
+				store.state.stallReason = noCorReason;
 				verdict = "stalled";
 				record.verdict = verdict;
 				store.state.milestones.push(record);
 				store.save();
-				emit(`milestone ${m}: STALLED — no corrections offered, needs you`);
-				store.appendEvent("milestone_verdict", `milestone ${m}: STALLED`, "no corrections offered", { seat: "lead" });
+				emit(`milestone ${m}: STALLED — needs you: ${noCorReason}`);
+				store.appendEvent("milestone_verdict", `milestone ${m}: STALLED`, noCorReason, { seat: "lead" });
 				await offerRescue(liveThisMilestone, workCwd, gitExcludes, store, emit, config.rescueWaitMs);
 				break;
 			}
@@ -534,7 +600,10 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 		const annotated = annotateVerdict(baseVerdict, scoreCard);
 		const finalMsg = `mission ${annotated} — $${store.state.costUsd.toFixed(2)} over ${store.state.milestones.length} milestone(s)`;
 		emit(finalMsg);
-		store.appendEvent("lifecycle", finalMsg, undefined, { seat: "system" });
+		if (store.state.stallReason) {
+			emit(`stall reason: ${store.state.stallReason}`);
+		}
+		store.appendEvent("lifecycle", finalMsg, store.state.stallReason, { seat: "system" });
 	} catch (err) {
 		const errMsg = `FAILED: ${err instanceof Error ? err.message : String(err)}`;
 		emit(errMsg);
