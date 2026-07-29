@@ -366,6 +366,12 @@ export interface MissionState {
 	/** Verdict of the final milestone — why the mission stopped. */
 	finalVerdict?: MilestoneVerdict;
 	outcome?: MissionOutcome;
+	/**
+	 * Plain-language explanation of why the mission stalled, surfaced wherever
+	 * "NEEDS YOU" is printed. Includes a full sentence, optional invariant slugs
+	 * as detail, and a note on what the harness tried before giving up.
+	 */
+	stallReason?: string;
 	costUsd: number;
 	reportPath?: string;
 	log: string[];
