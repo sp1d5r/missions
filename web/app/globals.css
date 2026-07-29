@@ -1,0 +1,430 @@
+@import "tailwindcss";
+
+/*
+ * The ops-console theme from src/theme.ts, carried across intact.
+ *
+ * The three rules that make it an instrument rather than a costume still hold
+ * here, and the third one is the reason this file is mostly hairlines:
+ *
+ *   1. COLOUR IS SEMANTIC, NEVER DECORATIVE. Red broke, amber wants a decision,
+ *      healthy stays bone-monochrome. A screen with no colour is good news you
+ *      can read at a glance — which only works if colour is never spent on chrome.
+ *   2. CONTRAST IS LIFTED so hairlines survive a bright room, not just an OLED
+ *      screenshot.
+ *   3. NO DECORATIVE DATA. Every mark is a fact about a mission.
+ *
+ * Kept as real CSS rather than Tailwind classes so the class names (.framed,
+ * .stat, .tag, .panel) stay identical to the generated report. One vocabulary,
+ * two renderers.
+ */
+
+:root {
+  --bg: #0b0c0d;
+  --panel: #101214;
+  --panel-raised: #15181a;
+  --hairline: #282c30;
+  --hairline-bright: #3a4046;
+  --text: #d7dbde;
+  --text-dim: #868d94;
+  --text-faint: #5b6168;
+
+  --ok: #d7dbde;   /* healthy — deliberately not green; quiet bone means nothing to see */
+  --warn: #d08b28; /* wants a decision from you */
+  --bad: #e5484d;  /* broke */
+  --done: #7d6cc4; /* landed / archived */
+  --live: #5aa9d6; /* in flight */
+
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-hairline: var(--hairline);
+  --color-text: var(--text);
+  --color-dim: var(--text-dim);
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.6 ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden; /* the panes scroll, the document never does */
+}
+
+.wrap { max-width: 1100px; margin: 0 auto; position: relative; }
+
+/* Corner brackets: the console frame. Drawn, not imagery. */
+.framed { position: relative; padding: 18px 14px; }
+.framed::before, .framed::after {
+  content: ""; position: absolute; width: 14px; height: 14px; pointer-events: none;
+}
+.framed::before { top: 0; left: 0; border-top: 1px solid var(--hairline-bright); border-left: 1px solid var(--hairline-bright); }
+.framed::after { bottom: 0; right: 0; border-bottom: 1px solid var(--hairline-bright); border-right: 1px solid var(--hairline-bright); }
+
+h1 { font-size: 15px; font-weight: 500; letter-spacing: .02em; margin: 0 0 3px; }
+h2 {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .16em;
+  color: var(--text-dim); font-weight: 400;
+  margin: 30px 0 10px; padding-bottom: 6px;
+  border-bottom: 1px solid var(--hairline);
+}
+h3 { font-size: 12px; font-weight: 500; margin: 20px 0 6px; letter-spacing: .02em; }
+a { color: var(--live); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.label { font-size: 9.5px; text-transform: uppercase; letter-spacing: .14em; color: var(--text-dim); }
+.dim { color: var(--text-dim); }
+.faint { color: var(--text-faint); }
+.mono { font-variant-numeric: tabular-nums; }
+
+/* Stat strip: big number, tiny caption underneath. Wraps to two rows on a phone. */
+.stats { display: flex; flex-wrap: wrap; border: 1px solid var(--hairline); margin: 16px 0 4px; }
+.stat { flex: 1 1 90px; padding: 12px 14px; border-right: 1px solid var(--hairline); }
+.stat:last-child { border-right: 0; }
+.stat b { display: block; font-size: 24px; font-weight: 400; letter-spacing: -.01em; font-variant-numeric: tabular-nums; line-height: 1.15; }
+.stat span { font-size: 9.5px; text-transform: uppercase; letter-spacing: .13em; color: var(--text-dim); }
+
+table { border-collapse: collapse; width: 100%; font-size: 12px; }
+th {
+  text-align: left; padding: 8px 10px;
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: .13em; font-weight: 400;
+  color: var(--text-dim); border-bottom: 1px solid var(--hairline);
+}
+td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--hairline); vertical-align: top; }
+tbody tr:hover { background: var(--panel-raised); }
+
+.panel { border: 1px solid var(--hairline); background: var(--panel); padding: 14px 16px; margin: 10px 0; }
+blockquote {
+  margin: 8px 0; padding: 10px 14px; background: var(--panel);
+  border-left: 2px solid var(--hairline-bright); color: var(--text); white-space: pre-wrap;
+}
+
+/* Status tags. Uppercase, bracketed, colour only when it means something. */
+.tag {
+  display: inline-block; padding: 2px 7px; margin: 2px 4px 2px 0;
+  font-size: 10px; text-transform: uppercase; letter-spacing: .09em;
+  border: 1px solid currentColor; white-space: nowrap;
+}
+.t-ok { color: var(--ok); }
+.t-warn { color: var(--warn); }
+.t-bad { color: var(--bad); }
+.t-done { color: var(--done); }
+.t-live { color: var(--live); }
+.t-quiet { color: var(--text-dim); }
+
+.dot { display: inline-block; width: 6px; height: 6px; margin-right: 8px; vertical-align: middle; }
+
+/* Alert band: only rendered when there is genuinely something outstanding. */
+.alert { border: 1px solid var(--warn); padding: 12px 14px; margin: 16px 0; }
+.alert .label { color: var(--warn); }
+.alert ul { margin: 6px 0 0; padding-left: 18px; }
+.alert li { margin: 2px 0; }
+
+ul.log { list-style: none; margin: 6px 0 0; padding: 0; font-size: 11.5px; }
+ul.log li { padding: 2px 0; }
+.exit-ok { color: var(--text-dim); }
+.exit-bad { color: var(--bad); }
+
+pre.src {
+  background: var(--panel); border: 1px solid var(--hairline);
+  padding: 12px 14px; margin: 8px 0 0; overflow-x: auto;
+  font-size: 11px; color: var(--text-dim); white-space: pre;
+}
+.scroll { overflow-x: auto; }
+
+/* ── Additions the static report never needed ──────────────────────────────
+   The report is a document you open once. This is a surface you poke at from
+   a phone, so it needs targets you can hit with a thumb and controls that
+   read as pressable. Same palette, no new colours. */
+
+.nav { display: flex; gap: 2px; border: 1px solid var(--hairline); margin: 14px 0 4px; }
+.nav a {
+  flex: 1; text-align: center; padding: 10px 8px; color: var(--text-dim);
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: .13em;
+  border-right: 1px solid var(--hairline);
+}
+.nav a:last-child { border-right: 0; }
+.nav a:hover { background: var(--panel-raised); text-decoration: none; color: var(--text); }
+.nav a[data-active="true"] { color: var(--text); background: var(--panel-raised); }
+
+button, .btn {
+  font: inherit; font-size: 10px; text-transform: uppercase; letter-spacing: .12em;
+  background: transparent; color: var(--text-dim);
+  border: 1px solid var(--hairline-bright); padding: 9px 14px;
+  cursor: pointer; min-height: 40px;
+}
+button:hover:not(:disabled), .btn:hover { color: var(--text); background: var(--panel-raised); }
+button:disabled { opacity: .4; cursor: not-allowed; }
+button.danger { color: var(--bad); border-color: var(--bad); }
+button.primary { color: var(--text); border-color: var(--hairline-bright); background: var(--panel-raised); }
+
+input, textarea, select {
+  font: inherit; font-size: 16px; /* 16px: anything smaller makes iOS Safari zoom on focus */
+  width: 100%; background: var(--panel); color: var(--text);
+  border: 1px solid var(--hairline); padding: 10px 12px;
+}
+input:focus, textarea:focus, select:focus { outline: none; border-color: var(--hairline-bright); }
+textarea { resize: vertical; min-height: 76px; }
+
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.grow { flex: 1 1 auto; min-width: 0; }
+.stack { display: flex; flex-direction: column; gap: 8px; }
+
+/* Chief transcript. Pre-wrapped because the daemon speaks in rendered lines. */
+.transcript {
+  border: 1px solid var(--hairline); background: var(--panel);
+  padding: 12px 14px; height: 52vh; overflow-y: auto;
+  white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.55;
+}
+.transcript .you { color: var(--live); }
+
+.banner {
+  border: 1px solid var(--warn); color: var(--warn);
+  padding: 10px 12px; margin: 0 0 14px; font-size: 11px;
+}
+
+.empty { color: var(--text-faint); padding: 24px 0; text-align: center; font-size: 12px; }
+
+/* ── The board ─────────────────────────────────────────────────────────────
+   A <table> in an overflow-x container put STATE, STEP, COST and AGE off the
+   right edge of a phone — hiding the two facts you opened the board to see
+   (is it running, does it want me). One markup, two layouts: a grid on a wide
+   screen, a stacked card on a narrow one. Nothing scrolls sideways. */
+
+.mrow {
+  display: grid;
+  grid-template-columns: 116px 130px 1fr 190px 46px 62px 40px;
+  gap: 10px;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--hairline);
+  align-items: start;
+}
+.mrow:hover { background: var(--panel-raised); }
+.mhead {
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: .13em;
+  color: var(--text-dim);
+}
+.mhead:hover { background: none; }
+.m-label { display: none; }
+
+@media (max-width: 780px) {
+  .mhead { display: none; }
+  .mrow {
+    grid-template-columns: 1fr auto;
+    gap: 4px 10px;
+    padding: 12px 2px;
+  }
+  /* name and state ride the first line together; everything else stacks */
+  .m-name { grid-column: 1; font-size: 13px; }
+  .m-state { grid-column: 2; grid-row: 1; text-align: right; }
+  .m-goal { grid-column: 1 / -1; }
+  .m-repo { grid-column: 1 / -1; order: 9; }
+  .m-meta { grid-column: 1 / -1; order: 10; display: flex; gap: 14px; }
+  .m-label { display: inline; color: var(--text-faint); }
+}
+
+/* Wide screens keep the meta cells as discrete columns. */
+@media (min-width: 781px) {
+  .m-meta { display: contents; }
+}
+
+/* ── App shell ─────────────────────────────────────────────────────────────
+   Slack's structure, this console's palette: a narrow rail, a list of
+   missions, and a thread. The document itself never scrolls — each pane owns
+   its own scroller, so the composer can sit still at the bottom while the
+   thread moves behind it.
+
+   100dvh, not 100vh: on iOS the small/large viewport differ by the height of
+   the browser chrome, and with interactive-widget=resizes-content the dynamic
+   unit is what shrinks when the keyboard opens. */
+
+.app {
+  display: grid;
+  grid-template-columns: 54px 300px minmax(0, 1fr);
+  height: 100dvh;
+}
+
+.rail {
+  border-right: 1px solid var(--hairline);
+  background: var(--panel);
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 10px 0;
+  overflow-y: auto;
+}
+.rail a, .rail .rail-badge {
+  width: 38px; height: 38px;
+  display: grid; place-items: center;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  font-size: 10px; letter-spacing: .04em;
+}
+.rail a:hover { color: var(--text); background: var(--panel-raised); text-decoration: none; }
+.rail a[data-active="true"] {
+  color: var(--text); background: var(--panel-raised); border-color: var(--hairline-bright);
+}
+.rail-sep { width: 22px; height: 1px; background: var(--hairline); margin: 6px 0; }
+
+.side {
+  border-right: 1px solid var(--hairline);
+  display: flex; flex-direction: column; min-height: 0;
+}
+.side-head {
+  flex: 0 0 auto;
+  padding: 12px 14px; border-bottom: 1px solid var(--hairline);
+}
+.side-scroll { flex: 1 1 auto; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 20px; }
+.side-group {
+  padding: 14px 14px 4px;
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: .14em; color: var(--text-faint);
+}
+
+/* A mission is a channel. Name, one line of goal, a state dot. */
+.chan {
+  display: grid; grid-template-columns: 8px 1fr auto; gap: 8px;
+  align-items: baseline;
+  padding: 8px 14px;
+  color: var(--text-dim);
+  border-left: 2px solid transparent;
+}
+.chan:hover { background: var(--panel-raised); text-decoration: none; }
+.chan[data-active="true"] {
+  background: var(--panel-raised); border-left-color: var(--hairline-bright);
+}
+.chan[data-active="true"] .chan-name { color: var(--text); }
+.chan-name { color: var(--text); font-size: 12px; }
+.chan-goal {
+  grid-column: 2 / -1; color: var(--text-faint); font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.chan-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; align-self: center; }
+.chan-meta { font-size: 10px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+
+.main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.main-head {
+  flex: 0 0 auto;
+  padding: 12px 16px; border-bottom: 1px solid var(--hairline);
+  display: flex; gap: 10px; align-items: flex-start;
+}
+.thread {
+  flex: 1 1 auto; min-height: 0;
+  overflow-y: auto; overscroll-behavior: contain;
+  padding: 14px 16px 20px;
+}
+.composer {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--hairline);
+  background: var(--panel);
+  padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+}
+.composer textarea { min-height: 44px; max-height: 30vh; }
+
+/* One event = one message. Time gutter, then who and what. */
+.msg { display: grid; grid-template-columns: 62px 1fr; gap: 12px; padding: 4px 0; align-items: baseline; }
+.msg-when { color: var(--text-faint); font-size: 11px; font-variant-numeric: tabular-nums; }
+.msg-body { min-width: 0; }
+.msg-who { color: var(--text); }
+.msg-kind { color: var(--text-faint); font-size: 10px; text-transform: uppercase; letter-spacing: .1em; }
+.msg-detail { color: var(--text-dim); }
+.msg.is-error .msg-who { color: var(--bad); }
+.msg-sep {
+  display: grid; grid-template-columns: 62px 1fr; gap: 12px;
+  margin: 14px 0 6px; align-items: center;
+}
+.msg-sep span { font-size: 9.5px; text-transform: uppercase; letter-spacing: .14em; color: var(--text-faint); }
+.msg-sep::after { content: ""; height: 1px; background: var(--hairline); }
+
+.back { display: none; }
+
+/* ── Phone: one pane at a time ─────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .app { grid-template-columns: minmax(0, 1fr); }
+  .rail { display: none; }
+  .app[data-pane="main"] .side { display: none; }
+  .app[data-pane="side"] .main { display: none; }
+  .back { display: inline; }
+  .thread { padding: 12px 12px 16px; }
+}
+
+/* Thread subtitle: a goal is prose, not a micro-label. Uppercasing it mangled
+   the sentence and ate five lines of a phone screen, so it stays sentence-case
+   and clamps to two lines. */
+.head-sub {
+  color: var(--text-dim); font-size: 11.5px; line-height: 1.45;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.main-head { position: sticky; top: 0; background: var(--bg); z-index: 2; }
+
+/* ── Chat messages ─────────────────────────────────────────────────────────
+   Author and time on one line, body beneath it — not a time gutter with the
+   author buried inline, which read as a log rather than a conversation.
+   Consecutive messages from the same speaker within a few minutes drop the
+   header and just add a paragraph, so a reply is one block of prose instead of
+   a stack of repeated names. */
+
+.chat { display: flex; flex-direction: column; }
+.cmsg { padding: 8px 0 2px; }
+.cmsg + .cmsg.is-cont { padding-top: 0; }
+.cmsg-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 2px; }
+.cmsg-who { color: var(--text); font-size: 12px; letter-spacing: .02em; }
+.cmsg-who[data-role="you"] { color: var(--live); }
+
+/*
+ * Seats (src/seats.ts). Colour carries meaning here, so it is rationed: only the seats you
+ * actually scan for get one. `eng` and `setup` stay bone because "the engineer worked" is the
+ * default state of a mission and colouring the default is how a palette stops meaning anything.
+ */
+.cmsg-who[data-role="chief"] { color: var(--live); }
+.cmsg-who[data-role="lead"] { color: var(--done); }
+.cmsg-who[data-role="qa"] { color: var(--warn); }
+.cmsg-who[data-role="system"] { color: var(--text-faint); }
+.cmsg.is-system .cmsg-who[data-role="system"] { color: var(--bad); }
+.cmsg-who[title] { cursor: help; }
+
+/* ── threaded replies ──────────────────────────────────────────────────────── */
+.replies { margin: 4px 0 2px; }
+.replies-toggle {
+  background: none;
+  border: 0;
+  padding: 2px 0;
+  font: inherit;
+  font-size: 11px;
+  color: var(--live);
+  cursor: pointer;
+  letter-spacing: .02em;
+}
+.replies-toggle:hover { text-decoration: underline; }
+.replies-bad { color: var(--bad); }
+/* A stalled count in the org tally — amber, because it wants a decision, not because it broke. */
+.tally-bad { color: var(--warn); }
+/* The rail is the thread: indented and hairlined, so replies read as subordinate at a glance. */
+.replies-body {
+  margin: 4px 0 2px 2px;
+  padding-left: 10px;
+  border-left: 1px solid var(--hairline);
+}
+.reply { padding: 3px 0; }
+.reply-label { font-size: 12px; color: var(--text-dim); }
+/*
+ * Passing assertions stay dim — twenty of them in a row is the good news, and colouring good
+ * news is how a palette stops meaning anything. The failures are what the thread was opened for.
+ */
+.reply.is-bad .reply-label { color: var(--bad); }
+.reply.is-bad { border-left: 1px solid var(--bad); margin-left: -11px; padding-left: 10px; }
+.cmsg-when { color: var(--text-faint); font-size: 10px; font-variant-numeric: tabular-nums; }
+.cmsg-text {
+  white-space: pre-wrap; word-break: break-word;
+  color: var(--text); line-height: 1.65; font-size: 12.5px;
+  padding-left: 2px;
+}
+.cmsg.is-system .cmsg-text { color: var(--bad); }
+
+/* Hover reveals the time on grouped messages, the way every chat app does it. */
+.cmsg.is-cont .cmsg-when { visibility: hidden; }
+.cmsg.is-cont:hover .cmsg-when { visibility: visible; }
