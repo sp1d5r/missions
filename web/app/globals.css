@@ -508,3 +508,14 @@ textarea { resize: vertical; min-height: 76px; }
 /* Hover reveals the time on grouped messages, the way every chat app does it. */
 .cmsg.is-cont .cmsg-when { visibility: hidden; }
 .cmsg.is-cont:hover .cmsg-when { visibility: visible; }
+
+/* Image attachments from tool results. Constrained so a large render does not
+   blow the thread column apart; border so it reads as a discrete attachment. */
+.cmsg-image { margin: 6px 0 2px; }
+.cmsg-image img {
+  display: block;
+  max-width: 100%;
+  max-height: 480px;
+  border: 1px solid var(--hairline);
+  background: var(--panel);
+}

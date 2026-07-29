@@ -315,7 +315,8 @@ export type MissionEventKind =
 	| "validation_result"
 	| "milestone_verdict"
 	| "lifecycle"
-	| "error";
+	| "error"
+	| "image";
 
 export interface MissionEvent {
 	/** ISO timestamp. */
@@ -341,6 +342,13 @@ export interface MissionEvent {
 	 * reader.
 	 */
 	thread?: string;
+	/** Populated for kind="image" events: the stored image on disk. */
+	image?: {
+		path: string;
+		mimeType: string;
+		bytes: number;
+		alt?: string;
+	};
 }
 
 export interface MissionState {

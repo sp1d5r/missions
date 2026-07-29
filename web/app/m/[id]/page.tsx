@@ -132,7 +132,7 @@ export default async function Mission({ params }: { params: Promise<{ id: string
 
 				{/* ── the thread proper ─────────────────────────────────────────── */}
 				{/* A client component: replies expand in place, which is the whole point of them. */}
-				<MissionThread events={events} />
+				<MissionThread events={events} id={id} />
 
 				{st?.commits && st.commits.length > 0 && (
 					<>

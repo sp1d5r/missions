@@ -59,7 +59,20 @@ function Replies({ items }: { items: MissionEvent[] }) {
 	);
 }
 
-export function MissionThread({ events }: { events: MissionEvent[] }) {
+function MissionImage({ id, event }: { id: string; event: MissionEvent }) {
+	if (!event.image) return null;
+	const basename = event.image.path.split("/").pop() ?? "";
+	const src = `/api/m/${id}/images/${basename}`;
+	const alt = event.image.alt ?? event.label;
+	return (
+		<div className="cmsg-image">
+			{/* eslint-disable-next-line @next/next/no-img-element */}
+			<img src={src} alt={alt} />
+		</div>
+	);
+}
+
+export function MissionThread({ events, id }: { events: MissionEvent[]; id: string }) {
 	if (events.length === 0) return <div className="empty">No timeline recorded for this mission.</div>;
 
 	const groups = groupTimeline(events);
@@ -98,6 +111,7 @@ export function MissionThread({ events }: { events: MissionEvent[] }) {
 							)}
 							<div className="cmsg-text">{e.label}</div>
 							{e.detail && <div className="msg-detail">{e.detail}</div>}
+							{e.image && <MissionImage id={id} event={e} />}
 							<Replies items={g.children} />
 						</div>
 					</div>
