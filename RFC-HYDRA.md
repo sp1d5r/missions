@@ -1,6 +1,8 @@
 # RFC — hydra heads as the overseer's senses
 
-Status: **draft, for discussion**. Written 2026-07-27. No code yet.
+Status: **draft, revised 2026-07-29** after a review pass and a quality spike. Corrections from that
+pass are marked **[rev]** inline; the biggest is that heads must run on the *worker's* model, not a
+cheaper one, and that the first thing to measure is signal, not cost.
 
 Proposes bringing [pi-hydra](https://github.com/pandysp/pi-hydra)'s idea — autonomous observer "heads" that
 watch a running agent through prompt-cache replay — into `missions`, but pointed at a specific job: telling
@@ -168,7 +170,8 @@ Sketch, deliberately not final:
 
 - The worker, when heads are enabled, wraps its `streamFn` so each provider request's payload is captured.
 - On the worker's `message_start` (already observed at `src/worker.ts:141`), each active head replays the
-  captured payload + its observation prompt as a **pure cache read**, on the head's own cheap model.
+  captured payload + its observation prompt as a **pure cache read**, **on the worker's own model** —
+  see the economics section, where an earlier draft got this wrong. **[rev]**
 - The head's structured reply is parsed into `noop | note | flag` and, if not noop, appended to
   `findings.jsonl` and mirrored to the timeline via `store.appendEvent(...)`.
 
@@ -190,12 +193,22 @@ Three consumers, one file:
 1. **Overseer** — a new read-only tool `head_findings` (reads `findings.jsonl`), plus the open flags folded
    into the system prompt's snapshot next to `openIssues`. The overseer stops being blind to what the heads
    saw while no one was watching.
-2. **Timeline** — a new `MissionEventKind` (`"head_finding"`, added to the union at `src/types.ts:280`) so
-   flags render in the mission view's timeline pane alongside tool calls and verdicts.
+2. **Timeline** — a new `MissionEventKind` (`"head_finding"`, added to the union at `src/types.ts:301`) so
+   flags render alongside tool calls and verdicts. **[rev]** The timeline gained two fields since this RFC
+   was drafted, and they fit a head better than anything that existed before:
+   - `seat` (`src/seats.ts`) — every event now says *who posted it*, and the view colours by seat. A head is
+     a new seat, not a nameless kind; findings read as a participant speaking rather than harness noise.
+   - `thread` — events group under the turn they belong to (`groupTimeline`). A finding should carry the
+     **thread of the turn it observed**, so a flag appears nested under the worker turn that provoked it
+     rather than floating at top level. This is the single change that decides whether findings read as
+     commentary or as clutter.
 3. **Report** — a `flag` with an open disposition is the same shape as a `HandoffIssue`
-   (`src/types.ts:154`, `disposition?: "addressed" | "deferred"`). Unresolved head flags become issues the
-   report must account for — which is precisely `CONTRACTS.md` proposal #1 ("dispositions must cite
-   evidence") arriving with real targets to cite.
+   (`src/types.ts:170`, `disposition?: IssueDisposition`). Unresolved head flags become issues the report
+   must account for — which is precisely `CONTRACTS.md` proposal #1 ("dispositions must cite evidence")
+   arriving with real targets to cite.
+4. **Web console — free. [rev]** `web/` reads mission state from disk through the same readers as the TUI, so
+   `findings.jsonl` next to `chat.jsonl` in `outDir` surfaces on the mission page (and therefore on a phone)
+   with no console-side work beyond rendering the new event kind.
 
 ---
 
@@ -221,34 +234,70 @@ interactive pi TUI (`before_provider_request`, `pi.sendMessage`, `ctx.abort`); w
 
 ---
 
-## Economics, and the one assumption we must verify first
+## Economics — and the mistake an earlier draft made **[rev]**
 
-Hydra's whole viability is the cache-hit rate: ~98% hit → ~30% overhead. That number was measured in **its**
+Hydra's viability is the cache-hit rate: ~98% hit → ~30% overhead. That number was measured in **its**
 setup. **Ours is different** — our payloads route through `pi.ts`'s `streamFn`, workers run
 `thinkingLevel: "off"`, and provider/model routing is our own (`src/models.ts`). The prefix being
 byte-identical is an assumption, not a given, until measured here.
 
-So **step 1 of any implementation is a throwaway spike that measures the cache-hit rate of one hardcoded head
-against one real worker turn in our harness.** If the prefix is not byte-identical through our seam, the 30%
-becomes something much worse, and the economics change the design. Everything else in this RFC is wiring we
-already own; this is the single load-bearing unknown, so it gets proven before anything is built.
+**The correction.** An earlier draft of this document also said, under Risks, that heads should run on the
+"cheapest capable model — likely the scout seat, not the worker seat." **That silently guarantees a 0%
+cache-hit rate, and the two claims cannot both hold.** Anthropic prompt caches are keyed **per model**: a
+cache entry written by `claude-sonnet-4-6` is unreadable by any other model, and `bugSpotter` is deliberately
+routed to OpenAI (`src/models.ts`), so across providers there is no shared cache at all. Put a head on a
+cheaper model and every observation becomes a **full prefill of the worker's entire context, every turn, per
+head** — with three heads that is several times the worker's own cost, not 30% of it.
+
+So the rule is: **a head runs on the same model as the worker it watches.** The cheapness comes from
+cache-read *pricing* (~10% of the input rate), not from a cheaper *model*. With that fixed, the original
+economics stand.
+
+Two second-order effects worth measuring rather than assuming:
+
+- **The breakpoint moves.** `pi-ai` places `cache_control` on the *last* user message. A head that appends its
+  own observation prompt reads the existing prefix but also writes a **new** cache entry at the new
+  breakpoint — so per head, per turn, expect one large read plus one small write, not a read alone.
+- **Heads share a worker's cache but not each other's.** Three heads on the same model read the same prefix;
+  that is the good case, and the reason to keep every head on the worker seat rather than spreading them.
 
 Cost is charged honestly regardless: head replays go through the same `onCost` meter as scouts and the worker
 (`src/worker.ts:119`), so the overhead is a visible line in mission spend, not a hidden tax.
+
+### Why this is no longer step 1 **[rev]**
+
+The original phasing put the cache measurement first, on the grounds that it was the single load-bearing
+unknown. It is *a* load-bearing unknown, but it is the wrong one to retire first, because it answers "can we
+afford these heads?" before anything has established that the heads are worth affording.
+
+There is also a practical asymmetry: the cost question requires the replay plumbing to exist, while the
+**signal** question does not. Every mission already persists, per feature, the worker's own claim
+(`handoff.completed`), the commands it actually ran with exit codes (`handoff.commands`), what it admits it
+did not do (`leftUndone`), and the orchestrator's disposition prose (`issues[].dispositionNote`). That is
+precisely the input a `confidence` head judges — so head quality can be measured **offline, today, against
+runs already on disk**, with no harness change at all.
+
+Replay is an *optimisation of a head that already works*. Quality goes first. See `spike/heads/`.
 
 ---
 
 ## Phasing
 
-1. **Spike the economics.** One head, hardcoded, one worker, measure the cache-hit rate through `pi.ts`. Prove
-   or kill the 30% assumption. No product code.
-2. **`confidence` head, end to end.** The highest-value one, and the one tied to a written doctrine. Head file
+1. **Spike the signal.** **[rev — was "spike the economics".]** Run the three head prompts offline over the
+   handoffs and dispositions of real completed runs, plus the two `CONTRACTS.md` post-mortems as labelled
+   known-bad cases. Two numbers decide it: **recall** on the known-bad cases (does `confidence` catch Run B's
+   *"validators independently confirmed"*?) and **flag rate** on the ordinary corpus (would a human still read
+   them?). A head that fails either is not worth plumbing. No product code — `spike/heads/`.
+2. **Spike the economics.** Only for heads that survived (1). One head, hardcoded, one worker, measure the
+   cache-hit rate through `pi.ts` **on the worker's model**. Prove or kill the 30% assumption. A spike run on
+   a cheap model measures the failure by construction and tells you nothing.
+3. **`confidence` head, end to end.** The highest-value one, and the one tied to a written doctrine. Head file
    → replay → `findings.jsonl` → timeline event → report issue. A human sees "confidence outran evidence"
    flags in the view.
-3. **Overseer consumes findings.** `head_findings` tool + flags in the snapshot. Now the on-demand overseer
+4. **Overseer consumes findings.** `head_findings` tool + flags in the snapshot. Now the on-demand overseer
    inherits what the always-on heads saw.
-4. **`direction` and `assumption` heads.** Same rails, two more specs.
-5. **Repo-authored heads + `--heads` selection.** Generalise loading and let a target ship its own doctrine
+5. **`direction` and `assumption` heads.** Same rails, two more specs.
+6. **Repo-authored heads + `--heads` selection.** Generalise loading and let a target ship its own doctrine
    head.
 
 Each phase is shippable and reversible; heads off = today's behaviour exactly.
@@ -257,12 +306,14 @@ Each phase is shippable and reversible; heads off = today's behaviour exactly.
 
 ## Risks and open questions
 
-- **The cache assumption (highest).** Covered above; step 1 exists to retire it.
-- **Head noise.** A `confidence` head that flags every hedge is worse than nothing — the overseer prompt's own
-  "steer sparingly" discipline has to be baked into the head prompt: `flag` is expensive, `note` is cheap,
-  `noop` is the default. Tune against the two runs in `CONTRACTS.md` as fixtures.
-- **Model for heads.** Cheapest capable model — they judge, they don't build. Likely the scout seat, not the
-  worker seat.
+- **Head noise (highest). [rev — promoted above the cache assumption.]** A `confidence` head that flags every
+  hedge is worse than nothing — the overseer prompt's own "steer sparingly" discipline has to be baked into
+  the head prompt: `flag` is expensive, `note` is cheap, `noop` is the default. This is now what phase 1
+  measures, against real handoffs plus the two `CONTRACTS.md` runs as labelled fixtures.
+- **The cache assumption.** Covered above; phase 2 retires it, and only for heads that earned it.
+- **Model for heads. [rev — this was wrong.]** ~~Cheapest capable model — likely the scout seat.~~ **The
+  worker's model, always.** Caches are keyed per model, so a head on any other model gets a 0% hit rate and
+  costs a full prefill per turn. Cheapness comes from cache-read pricing, not from a smaller model.
 - **Findings vs issues — one type or two?** A `flag` is nearly a `HandoffIssue`. Tempting to unify so the
   report has one disposition path; risk is conflating "a head suspects" with "a worker reported." Lean toward
   reusing the shape with a `source` discriminator.
@@ -292,7 +343,7 @@ Each phase is shippable and reversible; heads off = today's behaviour exactly.
 ---
 name: confidence
 description: Flags when a worker's claim outruns its proof.
-model: scout
+model: worker   # [rev] must match the watched worker's model — caches are keyed per model
 ---
 You watch one coding worker, one turn at a time. You judge exactly one thing:
 is what this turn CLAIMS supported by what it has actually DONE?
