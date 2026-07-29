@@ -23,20 +23,29 @@ Should print the `missions` usage banner. If you see it, the build is good.
 
 ## Tests
 
-Three of the four test files pass cleanly on a fresh checkout:
+All test files pass cleanly:
 
 ```bash
-node test/invariants.mjs   # plan / boundary invariant checks — all pass
-node test/control.mjs      # TUI frame composition + workspace resolution — all pass
-node test/lifecycle.mjs    # worktree lifecycle / sweep — all pass
+npm test
 ```
 
-The fourth file (`test/bootstrap.mjs`) is **currently broken** — it tests a `spec`-based API
-(`linkDirs`, `cloneDirs`, `linkedDirs`, `clonedDirs`) that no longer matches the
-`bootstrapWorktree` implementation. This is a known in-progress state described in
-`HANDOVER.md` and `CONTRACTS.md`; it is a test bug, not a build bug. As a result,
-`npm test` (which runs all four) exits non-zero. Use the three individual commands above as
-the smoke-check instead.
+This runs the full suite: `invariants`, `control`, `lifecycle`, `bootstrap`, `ports`, `seats`,
+`registry`, `setup`, `workers`, and `routines`. All ten exit zero on a fresh checkout.
+
+You can also run them individually:
+
+```bash
+node test/invariants.mjs   # plan / boundary invariant checks
+node test/control.mjs      # TUI frame composition + workspace resolution
+node test/lifecycle.mjs    # worktree lifecycle / sweep
+node test/bootstrap.mjs    # env-file discovery and copy into worktrees
+node test/ports.mjs        # port block derivation and allocation
+node test/seats.mjs        # timeline seat inference
+node test/registry.mjs     # mission liveness / stall detection
+node test/setup.mjs        # setup-record scoping
+node test/workers.mjs      # in-process worker steering
+node test/routines.mjs     # routine scheduling and deduplication
+```
 
 ## Other scripts
 
@@ -53,3 +62,6 @@ the smoke-check instead.
 - The `missions` CLI binary is also installed via `"bin": { "missions": "dist/cli.js" }`;
   after `npm ci` you can run it as `npx missions` or link it globally with
   `npm link`.
+- This CLI does not bind any TCP port itself — it communicates over Unix sockets. Port
+  management (`src/ports.ts`) is for the *target repos* the org manages, not for the
+  missions process itself.

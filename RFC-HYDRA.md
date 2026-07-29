@@ -4,6 +4,16 @@ Status: **draft, revised 2026-07-29** after a review pass and a quality spike. C
 pass are marked **[rev]** inline; the biggest is that heads must run on the *worker's* model, not a
 cheaper one, and that the first thing to measure is signal, not cost.
 
+**Phase 1 (signal spike) is complete.** See [`spike/heads/README.md`](spike/heads/README.md) for full
+results. Summary of per-head decisions:
+
+| Head | Phase 1 decision |
+|---|---|
+| `confidence` | **Build.** 4/4 recall on labelled known-bad; 13.3% flag rate on 30 real fixtures. Proceed to economics spike. |
+| `naive` | **Do not build.** 36.7% real flag rate with lower recall (3/4) than `confidence`. Dominated. |
+| `assumption` | **Hold.** False positive on `20-49/f2-m1` reveals no edit-ordering awareness; unresolvable without ordering context in the prompt. |
+| `direction` | **Hold.** Zero real flags and 2/4 labelled recall — needs a drift corpus with known-bad direction cases before go/no-go. |
+
 Proposes bringing [pi-hydra](https://github.com/pandysp/pi-hydra)'s idea — autonomous observer "heads" that
 watch a running agent through prompt-cache replay — into `missions`, but pointed at a specific job: telling
 us **whether a mission is going the right way, and whether its confidence is outrunning its evidence**. Not
