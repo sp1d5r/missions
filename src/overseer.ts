@@ -130,6 +130,15 @@ ANSWERING
 export interface OverseerSession {
 	/** Send a user message and get a streamed response. */
 	input(text: string): void;
+	/**
+	 * Ask one question and wait for the whole answer.
+	 *
+	 * `input` is built for a terminal that is already watching the stream. An HTTP request is
+	 * not: it needs to know when the turn is over and what was said. Both persist to the same
+	 * chat.jsonl, so a question asked from the console shows up in the TUI and vice versa —
+	 * one conversation about a mission, not one per surface.
+	 */
+	ask(text: string): Promise<string>;
 	/** Subscribe to streamed output text. Returns unsubscribe fn. */
 	subscribe(cb: (text: string) => void): () => void;
 	/** Load previous history as a rendered transcript string. */
@@ -267,8 +276,20 @@ function workerTools(missionId: string, outDir: string): AgentTool[] {
 	return [statusTool, listTool, tailTool, diffTool, askTool, steerTool];
 }
 
+export interface OverseerOptions {
+	/**
+	 * Replay prior chat.jsonl turns into the agent before the first message.
+	 *
+	 * A long-lived TUI session keeps its own context, so it does not need this. An HTTP handler
+	 * builds a session per request and would otherwise answer "and why is that?" with no idea
+	 * what "that" was. Capped, because the whole point of a per-request session is that it stays
+	 * cheap.
+	 */
+	seedHistory?: number;
+}
+
 /** Create a per-mission overseer agent, reusing chief agent machinery. */
-export function createOverseerSession(outDir: string): OverseerSession | null {
+export function createOverseerSession(outDir: string, options: OverseerOptions = {}): OverseerSession | null {
 	const store = StateStore.load(outDir);
 	if (!store) return null;
 	const { state } = store;
@@ -297,6 +318,23 @@ export function createOverseerSession(outDir: string): OverseerSession | null {
 		streamFn,
 		getApiKey: (provider) => getEnvApiKey(provider),
 	});
+
+	// Replay prior turns so a per-request session is not amnesiac. Done by assigning messages
+	// directly rather than re-prompting: re-prompting would pay for the model to answer every
+	// historical question again.
+	if (options.seedHistory && options.seedHistory > 0) {
+		const prior = loadChatHistory(outDir).slice(-options.seedHistory);
+		if (prior.length) {
+			agent.state.messages = prior.map(
+				(e) =>
+					({
+						role: e.role === "user" ? "user" : "assistant",
+						content: [{ type: "text", text: e.text }],
+						timestamp: Date.parse(e.at) || Date.now(),
+					}) as AgentMessage,
+			);
+		}
+	}
 
 	let busy = false;
 
@@ -373,6 +411,31 @@ export function createOverseerSession(outDir: string): OverseerSession | null {
 					}
 				});
 			}
+		},
+		async ask(text: string): Promise<string> {
+			const t = text.trim();
+			if (!t) return "";
+			appendChatEntry(outDir, { role: "user", text: t, at: new Date().toISOString() });
+			const chunks: string[] = [];
+			const cb = (chunk: string): void => {
+				chunks.push(chunk);
+			};
+			listeners.add(cb);
+			try {
+				await runTurn({ role: "user", content: [{ type: "text", text: t }], timestamp: Date.now() } as AgentMessage);
+			} finally {
+				listeners.delete(cb);
+			}
+			// The stream is written for a terminal, so it carries colour codes and the speaker
+			// label the caller already renders itself.
+			const answer = chunks
+				.join("")
+				// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI is the point
+				.replace(/\x1b\[[0-9;]*m/g, "")
+				.replace(/^\s*overseer\s*/, "")
+				.trim();
+			if (answer) appendChatEntry(outDir, { role: "overseer", text: answer, at: new Date().toISOString() });
+			return answer;
 		},
 		subscribe(cb) {
 			listeners.add(cb);
