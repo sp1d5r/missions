@@ -4,6 +4,7 @@ import { drainFrames, encode, legacySocketPaths, orgPidPath, readOrgPid, removeS
 import { createChiefSession, type ChiefSession } from "./chief.js";
 import { renderRun, runRoutine } from "./routine-run.js";
 import { dueRoutines } from "./routines.js";
+import { createChiefRecorder } from "./chieflog.js";
 import { registerWorkspace } from "./workspaces.js";
 
 /**
@@ -20,8 +21,13 @@ export async function runDaemon(homeCwd: string, socketPath: string): Promise<vo
 	const session = createChiefSession(homeCwd);
 	const clients = new Set<Socket>();
 
+	// The daemon is the only writer: whatever it broadcasts is what gets
+	// recorded, so a terminal and a phone can never disagree about what was said.
+	const recorder = createChiefRecorder();
+
 	// Broadcast every line of chief/mission output to all attached clients.
 	session.subscribe((text) => {
+		recorder.out(text);
 		for (const c of clients) {
 			try {
 				c.write(encode({ t: "out", text }));
@@ -44,7 +50,10 @@ export async function runDaemon(homeCwd: string, socketPath: string): Promise<vo
 			const { frames, rest } = drainFrames(buf);
 			buf = rest;
 			for (const f of frames) {
-				if (f.t === "input") session.input(f.text);
+				if (f.t === "input") {
+					recorder.input(f.text);
+					session.input(f.text);
+				}
 				else if (f.t === "hello" && f.text) {
 					registerWorkspace(f.text);
 					session.setFocus(f.text);
