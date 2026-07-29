@@ -160,6 +160,13 @@ function renderTimeline(events: MissionEvent[], state: MissionState, w: number, 
 	if (state.reportPath) {
 		lines.push(chalk.dim(`  ${state.reportPath}`));
 	}
+	// Debrief — shown above the scorecard/timeline when populated
+	if (state.debrief) {
+		lines.push(chalk.dim("  " + "─".repeat(Math.max(0, w - 4))));
+		for (const dl of state.debrief.split("\n")) {
+			lines.push(`  ${truncVis(dl, w - 4)}`);
+		}
+	}
 	lines.push(chalk.dim("  " + "─".repeat(Math.max(0, w - 4))));
 
 	if (!events || !events.length) {

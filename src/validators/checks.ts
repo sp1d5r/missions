@@ -152,8 +152,14 @@ export function annotateVerdict(
 ): string {
 	if (!verdictStr.startsWith("CLEAN")) return verdictStr;
 	const behaviouralPassed = scoreCard?.strengthBreakdown?.behavioural?.passed ?? 0;
-	if (behaviouralPassed > 0) return verdictStr;
-	return `${verdictStr} (existence-only — no assertion executed the feature)`;
+	const behaviouralTotal = scoreCard?.strengthBreakdown?.behavioural?.total ?? 0;
+	if (behaviouralPassed === 0) {
+		return `${verdictStr} (existence-only — no assertion executed the feature)`;
+	}
+	if (behaviouralPassed < behaviouralTotal) {
+		return `${verdictStr} (${behaviouralPassed} of ${behaviouralTotal} assertions executed the feature)`;
+	}
+	return verdictStr;
 }
 
 /**
