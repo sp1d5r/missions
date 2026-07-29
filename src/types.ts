@@ -302,6 +302,22 @@ export interface MissionEvent {
 	label: string;
 	/** Optional extra detail (tool args, assertion id, verdict reason, etc.). */
 	detail?: string;
+	/**
+	 * Which seat posted this — see seats.ts. Optional because missions written before this field
+	 * existed are still on disk and still have to render; `seatOf` guesses from the kind for those.
+	 */
+	seat?: import("./seats.js").Seat;
+	/**
+	 * Groups an event with the detail events that belong to it: a validation summary and the
+	 * per-assertion results underneath it share a thread id, so the timeline can show one line
+	 * with "5 replies" instead of six lines of equal weight.
+	 *
+	 * The FIRST event carrying a given id is the parent. That ordering rule is what makes this a
+	 * single string rather than a parent pointer plus an id on every event — the emitter already
+	 * writes them in order, and inventing ids for events nothing ever references is cost with no
+	 * reader.
+	 */
+	thread?: string;
 }
 
 export interface MissionState {

@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { appendFileSync } from "node:fs";
 import { join } from "node:path";
+import type { Seat } from "./seats.js";
 import type { MissionConfig, MissionEvent, MissionEventKind, MissionState } from "./types.js";
 
 /** Persists MissionState to <outDir>/state.json and a tail-able <outDir>/mission.log. */
@@ -60,9 +61,15 @@ export class StateStore {
 		this.save();
 	}
 
-	/** Append a structured event to the event log (used by the timeline pane). */
-	appendEvent(kind: MissionEventKind, label: string, detail?: string): void {
-		const event: MissionEvent = { at: new Date().toISOString(), kind, label, detail };
+	/**
+	 * Append a structured event to the event log (used by the timeline pane).
+	 *
+	 * `seat` is who posted it and `thread` groups an event with its detail events. Both are
+	 * optional so the dozens of existing call sites keep compiling, but a caller that knows the
+	 * answer should say so — see seats.ts on why recorded attribution beats guessing.
+	 */
+	appendEvent(kind: MissionEventKind, label: string, detail?: string, opts?: { seat?: Seat; thread?: string }): void {
+		const event: MissionEvent = { at: new Date().toISOString(), kind, label, detail, seat: opts?.seat, thread: opts?.thread };
 		if (!this.state.events) this.state.events = [];
 		this.state.events.push(event);
 		this.save();

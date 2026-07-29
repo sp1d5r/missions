@@ -70,13 +70,13 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 	};
 	const setStatus = (status: MissionState["status"]) => {
 		store.state.status = status;
-		store.appendEvent("status_transition", `status → ${status}`);
+		store.appendEvent("status_transition", `status → ${status}`, undefined, { seat: "system" });
 		publish();
 		onEvent?.({ type: "status", status });
 	};
 
 	try {
-		store.appendEvent("lifecycle", `mission started`, `goal: ${config.goal.slice(0, 120)}`);
+		store.appendEvent("lifecycle", `mission started`, `goal: ${config.goal.slice(0, 120)}`, { seat: "system" });
 		if (!isGitRepo(config.targetCwd)) throw new Error(`Target is not a git repo: ${config.targetCwd}`);
 		const baseSha = headSha(config.targetCwd);
 		store.state.baseSha = baseSha;
@@ -189,7 +189,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 		store.state.costUsd += planCost;
 		store.save();
 		emit(`plan: ${plan.features.length} feature(s), ${plan.contract.assertions.length} assertion(s) — $${planCost.toFixed(3)}`);
-		store.appendEvent("lifecycle", `plan ready: ${plan.features.length} feature(s), ${plan.contract.assertions.length} assertion(s)`, `cost $${planCost.toFixed(3)}`);
+		store.appendEvent("lifecycle", `plan ready: ${plan.features.length} feature(s), ${plan.contract.assertions.length} assertion(s)`, `cost $${planCost.toFixed(3)}`, { seat: "lead" });
 
 		// Gate the plan before a single worker is paid for. A contract that coerced away to
 		// nothing would otherwise score 0/0, and 0/0 has no failures, and no failures reads
@@ -257,7 +257,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 			// --- Work: strictly serial. One worker at a time, clean context each, commit between.
 			setStatus("working");
 			emit(`── milestone ${m}/${maxMilestones}: ${queue.length} feature(s)`);
-			store.appendEvent("milestone_verdict", `milestone ${m} started`, `${queue.length} feature(s) queued`);
+			store.appendEvent("milestone_verdict", `milestone ${m} started`, `${queue.length} feature(s) queued`, { seat: "lead" });
 			const handoffs: Handoff[] = [];
 			const liveThisMilestone: { workerId: string; release: () => void }[] = [];
 
@@ -268,7 +268,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 					break;
 				}
 				emit(`worker → ${feature.id}: ${feature.title}`);
-				store.appendEvent("tool_call", `worker: ${feature.id}`, feature.title);
+				store.appendEvent("tool_call", `worker: ${feature.id}`, feature.title, { seat: "eng" });
 				const assertions = plan.contract.assertions.filter((a) => feature.assertionIds.includes(a.id));
 				const result = await runWorker({
 					feature,
@@ -295,10 +295,10 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 					store.state.commits.push({ featureId: feature.id, sha, message: feature.title });
 					result.handoff.commitSha = sha;
 					emit(`  committed ${sha.slice(0, 8)} (${result.aborted ? "budget-capped" : result.stopReason}) — $${result.costUsd.toFixed(3)}`);
-					store.appendEvent("lifecycle", `committed ${feature.id}`, `${sha.slice(0, 8)} — $${result.costUsd.toFixed(3)}`);
+					store.appendEvent("lifecycle", `committed ${feature.id}`, `${sha.slice(0, 8)} — $${result.costUsd.toFixed(3)}`, { seat: "system" });
 				} else {
 					emit(`  no changes committed for ${feature.id} (${result.stopReason})`);
-					store.appendEvent("lifecycle", `no commit for ${feature.id}`, result.stopReason);
+					store.appendEvent("lifecycle", `no commit for ${feature.id}`, result.stopReason, { seat: "system" });
 				}
 
 				handoffs.push(result.handoff);
@@ -336,10 +336,15 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 			store.state.costUsd += scoreCard.costUsd;
 			store.save();
 			emit(`validated: ${scoreCard.assertionsPassed}/${scoreCard.assertionsTotal} assertions, ${scoreCard.bugs.length} bug(s)`);
+			// The summary and its per-assertion results share a thread, so the timeline shows one
+			// line with "12 replies" rather than thirteen lines of equal weight. A mission with
+			// forty assertions was otherwise a wall of ✓ that buried the verdict above it.
+			const vThread = `validation-m${m}`;
 			store.appendEvent(
 				"validation_result",
 				`validated: ${scoreCard.assertionsPassed}/${scoreCard.assertionsTotal} assertions passed`,
 				scoreCard.bugs.length > 0 ? `${scoreCard.bugs.length} bug(s) found` : "no bugs found",
+				{ seat: "qa", thread: vThread },
 			);
 			// Emit per-assertion pass/fail events
 			for (const a of plan.contract.assertions) {
@@ -347,6 +352,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 					"validation_result",
 					`${a.passed ? "✓" : "✗"} ${a.id}: ${a.statement.slice(0, 80)}`,
 					a.evidence ?? undefined,
+					{ seat: "qa", thread: vThread },
 				);
 			}
 
@@ -373,7 +379,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 				store.state.milestones.push(record);
 				store.save();
 				emit(`milestone ${m}: PASSED — contract satisfied, no open issues`);
-				store.appendEvent("milestone_verdict", `milestone ${m}: PASSED`, "contract satisfied, no open issues");
+				store.appendEvent("milestone_verdict", `milestone ${m}: PASSED`, "contract satisfied, no open issues", { seat: "lead" });
 				break;
 			}
 
@@ -384,7 +390,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 				store.state.milestones.push(record);
 				store.save();
 				emit(`milestone ${m}: hit milestone ceiling — needs you`);
-				store.appendEvent("milestone_verdict", `milestone ${m}: max-milestones ceiling hit`, record.assessment);
+				store.appendEvent("milestone_verdict", `milestone ${m}: max-milestones ceiling hit`, record.assessment, { seat: "lead" });
 				break;
 			}
 
@@ -396,7 +402,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 				store.state.milestones.push(record);
 				store.save();
 				emit(`milestone ${m}: budget floor reached ($${remainingUsd.toFixed(2)} left) — needs you`);
-				store.appendEvent("milestone_verdict", `milestone ${m}: budget exhausted`, `$${remainingUsd.toFixed(2)} remaining`);
+				store.appendEvent("milestone_verdict", `milestone ${m}: budget exhausted`, `$${remainingUsd.toFixed(2)} remaining`, { seat: "lead" });
 				break;
 			}
 
@@ -470,7 +476,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 				store.state.milestones.push(record);
 				store.save();
 				emit(`milestone ${m}: STALLED — ${blockers.map((b) => b.invariant).join(", ")} — needs you`);
-				store.appendEvent("milestone_verdict", `milestone ${m}: STALLED`, blockers.map((b) => b.invariant).join(", "));
+				store.appendEvent("milestone_verdict", `milestone ${m}: STALLED`, blockers.map((b) => b.invariant).join(", "), { seat: "lead" });
 				await offerRescue(liveThisMilestone, workCwd, gitExcludes, store, emit, config.rescueWaitMs);
 				break;
 			}
@@ -486,7 +492,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 				store.state.milestones.push(record);
 				store.save();
 				emit(`milestone ${m}: PASSED — contract satisfied, all issues ruled`);
-				store.appendEvent("milestone_verdict", `milestone ${m}: PASSED`, "contract satisfied, all issues ruled");
+				store.appendEvent("milestone_verdict", `milestone ${m}: PASSED`, "contract satisfied, all issues ruled", { seat: "lead" });
 				break;
 			}
 
@@ -496,7 +502,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 				store.state.milestones.push(record);
 				store.save();
 				emit(`milestone ${m}: STALLED — no corrections offered, needs you`);
-				store.appendEvent("milestone_verdict", `milestone ${m}: STALLED`, "no corrections offered");
+				store.appendEvent("milestone_verdict", `milestone ${m}: STALLED`, "no corrections offered", { seat: "lead" });
 				await offerRescue(liveThisMilestone, workCwd, gitExcludes, store, emit, config.rescueWaitMs);
 				break;
 			}
@@ -508,7 +514,7 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 			store.state.features.push(...corrections);
 			store.save();
 			emit(`milestone ${m}: scoped ${corrections.length} correction(s) → ${corrections.map((c) => c.id).join(", ")}`);
-			store.appendEvent("milestone_verdict", `milestone ${m}: corrections scoped`, corrections.map((c) => c.id).join(", "));
+			store.appendEvent("milestone_verdict", `milestone ${m}: corrections scoped`, corrections.map((c) => c.id).join(", "), { seat: "lead" });
 			queue = corrections;
 		}
 
@@ -528,11 +534,11 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 		const annotated = annotateVerdict(baseVerdict, scoreCard);
 		const finalMsg = `mission ${annotated} — $${store.state.costUsd.toFixed(2)} over ${store.state.milestones.length} milestone(s)`;
 		emit(finalMsg);
-		store.appendEvent("lifecycle", finalMsg);
+		store.appendEvent("lifecycle", finalMsg, undefined, { seat: "system" });
 	} catch (err) {
 		const errMsg = `FAILED: ${err instanceof Error ? err.message : String(err)}`;
 		emit(errMsg);
-		store.appendEvent("error", errMsg);
+		store.appendEvent("error", errMsg, undefined, { seat: "system" });
 		store.state.outcome = "needs-review";
 		setStatus("failed");
 		// Still emit a report so the failure is glanceable.
