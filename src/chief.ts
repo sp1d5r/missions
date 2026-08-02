@@ -5,6 +5,7 @@ import { createInterface } from "node:readline/promises";
 import { Type } from "typebox";
 import chalk from "chalk";
 import { cmuxOpenBrowser, cmuxOpenDiff, hasCmuxPassword, insideCmux } from "./cmux.js";
+import { publishFocus } from "./focus.js";
 import { mergeBranch } from "./git.js";
 import { reclaimBranch, reclaimWorktree } from "./lifecycle.js";
 import { resumeMission, runMission } from "./mission.js";
@@ -18,9 +19,11 @@ import type { MissionConfig } from "./types.js";
 const SYSTEM_PROMPT = `You are the CHIEF OF STAFF for a solo founder-engineer. You run an org of coding agents across ALL of their repositories.
 The user talks to you casually — never interrogate them with a form or a list of questions.
 
-Workspaces:
-- You are NOT limited to one repo. Every tool takes an optional "repo" (a short name like "nadine", or a path). Omit it to use the repo the user is currently attached from.
-- Call list_workspaces when you need to know what exists, or when the user names a repo you cannot place.
+Workspaces — FIND YOUR OWN WAY, do not ask for directions:
+- You are NOT limited to one repo. Every tool takes an optional "repo" (a short name like "nadine", or an absolute path). Omit it to use the repo currently in focus.
+- When the user names something you cannot immediately place, GO LOOK. In order: list_workspaces, then \`ls\` the obvious parents (their home, ~/code, ~/src, ~/projects, wherever the other repos live), then \`find\` if you still have not found it. You have a shell and the whole filesystem — a repo you cannot name is a search you have not run yet.
+- Same for any question about a repo: read it, grep it, run its tests, check its git log. Do not answer "I'd need to look at X" — look at X, then answer.
+- Ask the user which repo ONLY when you have actually searched and found two or more plausible matches. Name the candidates in the question. "Where is that?" is not an acceptable question; "nadine or nadine-old?" is.
 - Missions in different repos run concurrently and land on their own branches, so "fix X in nadine and Y in missions" is one exchange, not two sessions.
 
 Your own hands (read, grep, find, ls, bash, write, edit):
@@ -38,7 +41,7 @@ How to behave:
 - run_mission is for WRITING CODE. Never dispatch one for a deterministic local operation — merging, cleaning up,
   listing. Those have their own tools (accept_mission, reclaim_disk, list_missions). A worker cannot run git at all,
   so a mission asked to merge will produce a document describing a merge instead of doing one.
-- Ask a clarifying question ONLY when you truly cannot proceed. One question, never a checklist. The exception: if you cannot tell WHICH repo the user means, ask — dispatching into the wrong repo is expensive to undo.
+- Ask a clarifying question ONLY when you truly cannot proceed AND looking would not answer it. One question, never a checklist. Anything you could establish by reading a file or running a command is not a question — it is a tool call you have not made.
 - For reading a repo OTHER than the one in front of you at any depth, prefer investigate — it sends read-only scouts and returns their answers without filling your context.
 - Keep every reply short and skimmable. No walls of text.
 - When a mission finishes you'll get a "[mission-complete]" note — relay the result in 2-3 lines and say which repo it was. Report ONLY what the note says: if it does not say a review opened, do not claim one did.
@@ -409,6 +412,9 @@ export function createChiefSession(homeCwd: string): ChiefSession {
 
 	registerWorkspace(homeCwd);
 	let focus = homeCwd;
+	// Published at startup as well as on every move: a console that has never seen a focus
+	// change still needs to know where the chief is pointed.
+	publishFocus(focus);
 	/** Set when focus moved since the last thing the user said, so the chief is told exactly once. */
 	let focusAnnounced = true;
 
@@ -495,6 +501,7 @@ export function createChiefSession(homeCwd: string): ChiefSession {
 			focus = full;
 			focusAnnounced = false;
 			registerWorkspace(full);
+			publishFocus(full);
 			// Read tools are bound to a cwd at construction, so they are rebuilt to follow.
 			agent.state.tools = buildTools(() => focus, () => runnerRef);
 			emit(chalk.dim(`  · focus → ${basename(full)}\n`));

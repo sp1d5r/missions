@@ -40,11 +40,29 @@ function clock(iso: string): string {
 		: `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
-export function ChiefConsole({ canMutate }: { canMutate: boolean }) {
+export interface WorkspaceOption {
+	name: string;
+	path: string;
+}
+
+export function ChiefConsole({
+	canMutate,
+	workspaces = [],
+	focus,
+}: {
+	canMutate: boolean;
+	workspaces?: WorkspaceOption[];
+	/** Absolute path the chief is pointed at, or undefined if nothing has published it. */
+	focus?: string;
+}) {
 	const [blocks, setBlocks] = useState<Block[]>([]);
 	const [status, setStatus] = useState<"connecting" | "live" | "down">("connecting");
 	const [draft, setDraft] = useState("");
 	const [sending, setSending] = useState(false);
+	// Optimistic, so the picker reflects the click immediately. The server value is authoritative
+	// on the next load — a failed move reverts to it.
+	const [here, setHere] = useState<string | undefined>(focus);
+	const [moving, setMoving] = useState(false);
 	const logRef = useRef<HTMLDivElement>(null);
 	const pinnedToBottom = useRef(true);
 	/*
@@ -160,6 +178,43 @@ export function ChiefConsole({ canMutate }: { canMutate: boolean }) {
 		}
 	}, [draft, sending]);
 
+	const moveFocus = useCallback(
+		async (path: string) => {
+			if (!canMutate || moving || path === here) return;
+			const previous = here;
+			setMoving(true);
+			setHere(path);
+			try {
+				const res = await fetch("/api/actions", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ action: "focus", repo: path }),
+				});
+				if (!res.ok) {
+					const body = (await res.json().catch(() => ({}))) as { error?: string };
+					setHere(previous);
+					setBlocks((prev) => [
+						...prev,
+						{ role: "system" as const, text: body.error ?? res.statusText, at: new Date().toISOString() },
+					]);
+				}
+			} catch (err) {
+				setHere(previous);
+				setBlocks((prev) => [
+					...prev,
+					{
+						role: "system" as const,
+						text: err instanceof Error ? err.message : String(err),
+						at: new Date().toISOString(),
+					},
+				]);
+			} finally {
+				setMoving(false);
+			}
+		},
+		[canMutate, here, moving],
+	);
+
 	let lastDay = "";
 
 	return (
@@ -177,6 +232,42 @@ export function ChiefConsole({ canMutate }: { canMutate: boolean }) {
 						</span>
 					)}
 				</div>
+
+				{/*
+				 * Where the chief is pointed, and how to move it.
+				 *
+				 * Focus is global — this repoints an attached terminal too — so it is shown as
+				 * state you can see rather than a hidden default. The chief can reach any repo by
+				 * name or absolute path regardless; this only sets what "here" means when you
+				 * don't say.
+				 */}
+				{workspaces.length > 0 && (
+					<div className="row focus-bar" style={{ marginBottom: 10, flexWrap: "wrap", gap: 6 }}>
+						<span className="faint">focus</span>
+						{workspaces.map((w) => {
+							const active = w.path === here;
+							return (
+								// Deliberately NOT disabled when active: `button:disabled` fades to .4
+								// opacity, which would make the repo you are actually in the dimmest
+								// thing in the row. moveFocus already no-ops on a re-click.
+								<button
+									key={w.path}
+									type="button"
+									className={`tag focus-pick ${active ? "t-live" : "t-quiet"}`}
+									title={w.path}
+									aria-pressed={active}
+									disabled={!canMutate || moving}
+									onClick={() => void moveFocus(w.path)}
+								>
+									{w.name}
+								</button>
+							);
+						})}
+						{here === undefined && (
+							<span className="faint">unknown — start the org to publish it</span>
+						)}
+					</div>
+				)}
 
 				{blocks.length === 0 ? (
 					<span className="faint">

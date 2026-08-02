@@ -18,11 +18,12 @@
  */
 import { updateActive } from "@missions/registry.js";
 import { record } from "@/lib/data";
-import { daemonUp, sendInput } from "@/lib/daemon";
+import { daemonUp, sendInput, setFocus } from "@/lib/daemon";
+import { listWorkspaces } from "@missions/workspaces.js";
 import { mayMutate, requireOperator } from "@/lib/guard";
 
 interface Body {
-	action: "clear" | "steer" | "merge" | "dispatch";
+	action: "clear" | "steer" | "merge" | "dispatch" | "focus";
 	id?: string;
 	name?: string;
 	repo?: string;
@@ -57,6 +58,28 @@ export async function POST(req: Request) {
 			{ error: "no daemon — start the org with `missions chat` on the host" },
 			{ status: 503 },
 		);
+	}
+
+	/*
+	 * Focus is the one write that is NOT a sentence to the chief.
+	 *
+	 * It sends `hello`, which the daemon turns into registerWorkspace + setFocus, and focus is
+	 * GLOBAL — it repoints whatever terminal is also attached. That is why it is gated on an
+	 * exact known workspace rather than free text: a typo here would silently move someone
+	 * else's session to a directory that does not exist.
+	 */
+	if (body.action === "focus") {
+		const want = body.repo?.trim();
+		if (!want) return Response.json({ error: "repo required" }, { status: 400 });
+		const ws = listWorkspaces().find((w) => w.path === want || w.name === want);
+		if (!ws) {
+			return Response.json(
+				{ error: `unknown workspace "${want}" — pick one the org already knows` },
+				{ status: 400 },
+			);
+		}
+		await setFocus(ws.path);
+		return Response.json({ ok: true, said: `focus → ${ws.name}`, focus: ws.path });
 	}
 
 	// Everything below is a sentence typed at the chief, exactly as the TUI does

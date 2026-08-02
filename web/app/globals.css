@@ -519,3 +519,21 @@ textarea { resize: vertical; min-height: 76px; }
   border: 1px solid var(--hairline);
   background: var(--panel);
 }
+
+/*
+ * Repo focus picker in the chief pane.
+ *
+ * These are buttons wearing `.tag`, which means two rule sets meet: `button` supplies
+ * min-height/padding sized for a thumb, `.tag` supplies the uppercase bracketed look and a
+ * currentColor border. Left to collide, the tags came out 40px tall with 2px padding — a tap
+ * target with the type sitting at the top of it. Sized here explicitly so neither rule wins by
+ * accident, while keeping the row comfortably tappable on a phone.
+ */
+.focus-bar { align-items: center; }
+.focus-pick {
+  min-height: 28px; padding: 4px 9px; margin: 0;
+  display: inline-flex; align-items: center;
+}
+/* The active repo is not disabled (see the component) — it just should not look clickable. */
+.focus-pick[aria-pressed="true"] { background: var(--panel-raised); cursor: default; }
+.focus-pick[aria-pressed="true"]:hover { background: var(--panel-raised); }
