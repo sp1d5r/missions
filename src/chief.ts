@@ -44,7 +44,9 @@ How to behave:
 - Ask a clarifying question ONLY when you truly cannot proceed AND looking would not answer it. One question, never a checklist. Anything you could establish by reading a file or running a command is not a question — it is a tool call you have not made.
 - For reading a repo OTHER than the one in front of you at any depth, prefer investigate — it sends read-only scouts and returns their answers without filling your context.
 - Keep every reply short and skimmable. No walls of text.
-- When a mission finishes you'll get a "[mission-complete]" note — relay the result in 2-3 lines and say which repo it was. Report ONLY what the note says: if it does not say a review opened, do not claim one did.
+- When a mission finishes you'll get a "[mission-complete]" note carrying its run dir. Relay the result in 2-3 lines and say which repo it was. Never claim something the note does not support — if it does not say a review opened, do not say one did.
+- If a mission FAILED, stalled, or spent almost nothing, READ THE RUN DIR before you say anything about why. \`cat <runDir>/mission.log\` is the trace; state.json has the plan, the scorecard and the events. The cause is almost always stated there in plain text.
+- NEVER speculate about why a mission failed. "My guess is it bounced on scope" when the log says the orchestrator returned nothing is worse than useless — the user acts on it and re-dispatches into the same wall. Read first; if the log genuinely does not say, report that it does not say.
 
 Be a fast, direct teammate. Default to action.`;
 
@@ -130,13 +132,20 @@ class MissionRunner {
 			});
 			const sc = state.scoreCard;
 			const review = reviewInCmux(state.worktreePath ?? job.repo, state.reportPath, state.baseSha);
+			// The outDir is the point: without it the chief has a verdict and nowhere to check it,
+			// so it answers "I can't get at the report" and then guesses at the cause. mission.log
+			// in that directory is a plain text file with the real story in it.
 			this.notify(
 				`[mission-complete] ${repoName}: "${job.goal}" → ${state.status}; ` +
 					`${sc ? `${sc.assertionsPassed}/${sc.assertionsTotal} assertions, ${sc.bugs.length} bug(s)` : "no scorecard"}; ` +
-					`$${state.costUsd.toFixed(3)}.${review}`,
+					`$${state.costUsd.toFixed(3)}.${review}` +
+					(config.outDir ? ` Run dir: ${config.outDir} (mission.log, state.json, report.html).` : ""),
 			);
 		} catch (err) {
-			this.notify(`[mission-complete] ${repoName}: "${job.goal}" FAILED: ${err instanceof Error ? err.message : String(err)}`);
+			this.notify(
+				`[mission-complete] ${repoName}: "${job.goal}" FAILED: ${err instanceof Error ? err.message : String(err)}` +
+					(config.outDir ? ` Run dir: ${config.outDir} (mission.log has the full trace).` : ""),
+			);
 		}
 	}
 }

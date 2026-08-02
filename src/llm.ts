@@ -19,6 +19,21 @@ export async function complete(spec: ModelSpec, systemPrompt: string, userPrompt
 		.join("\n")
 		.trim();
 
+	/*
+	 * A failed call has no text content, so filtering for text and joining produced "" and threw
+	 * the reason away. Callers then reported their own symptom against an empty string — the
+	 * orchestrator's "did not return a usable plan. Raw:" with nothing after it, which reads as
+	 * "the model wrote something unparseable" when in fact it never answered at all. A whole
+	 * mission was diagnosed as too-large-a-scope on the strength of that.
+	 *
+	 * Same class as the worker dropping `errorMessage`: the one field that says what happened is
+	 * the one field not on the happy path.
+	 */
+	if (!text) {
+		const why = result.errorMessage ?? (result.stopReason && result.stopReason !== "stop" ? `stopReason: ${result.stopReason}` : undefined);
+		if (why) throw new Error(`${spec.provider}/${spec.modelId} returned no text — ${why}`);
+	}
+
 	return { text, costUsd: result.usage.cost.total };
 }
 
