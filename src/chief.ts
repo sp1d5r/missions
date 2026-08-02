@@ -7,7 +7,7 @@ import chalk from "chalk";
 import { cmuxOpenBrowser, cmuxOpenDiff, hasCmuxPassword, insideCmux } from "./cmux.js";
 import { mergeBranch } from "./git.js";
 import { reclaimBranch, reclaimWorktree } from "./lifecycle.js";
-import { runMission } from "./mission.js";
+import { resumeMission, runMission } from "./mission.js";
 import { autoRouting } from "./models.js";
 import { isLive, isStalled, readActive, updateActive } from "./registry.js";
 import { renderSweep, sweep } from "./lifecycle.js";
@@ -56,7 +56,6 @@ function configFor(targetCwd: string, goal: string, rfc: string, maxFeatures: nu
 		rfc,
 		targetCwd,
 		branch: `missions/${new Date().toISOString().slice(0, 10)}`,
-		budgetUsd: 8,
 		outDir: resolve(targetCwd, ".missions", "runs", runId),
 		routing: autoRouting(),
 		maxFeatures,
@@ -298,6 +297,49 @@ export function buildTools(focus: () => string, runner: () => MissionRunner): Ag
 		},
 	} as unknown as AgentTool;
 
+	const resumeTool = {
+		name: "resume_mission",
+		label: "resume",
+		description:
+			"Re-validate a finished mission in its existing worktree and continue it. Use when a mission stalled or hit its milestone ceiling and the blocking condition has since been resolved — " +
+			"you fixed and committed something on its branch, or the operator answered the question it was stuck on. " +
+			"Do NOT call it on a mission nothing has changed about: re-validating an unchanged tree costs money and returns the same red. " +
+			"Returns the scorecard before and after, and the new verdict.",
+		parameters: Type.Object({
+			missionId: Type.String({ description: "The mission id, or enough of its prefix to be unambiguous." }),
+			maxMilestones: Type.Optional(Type.Number({ description: "Raise the milestone ceiling. Defaults to current + 3." })),
+		}),
+		async execute(_id: string, params: { missionId: string; maxMilestones?: number }) {
+			const matches = readActive().filter((r) => r.id === params.missionId || r.id.startsWith(params.missionId));
+			if (!matches.length) return { content: [{ type: "text", text: `No mission matching "${params.missionId}". Use list_missions to see ids.` }] };
+			if (matches.length > 1) {
+				return { content: [{ type: "text", text: `"${params.missionId}" matches ${matches.length} missions: ${matches.map((m) => m.id).join(", ")}. Be more specific.` }] };
+			}
+			const r = matches[0];
+			if (!r?.outDir) return { content: [{ type: "text", text: `Mission ${r?.id ?? params.missionId} has no recorded output directory, so there is nothing to resume from.` }] };
+			if (!r.done) return { content: [{ type: "text", text: `Mission ${r.id} is still ${r.status}. Resuming a live mission is refused — wait for it to finish.` }] };
+
+			const before = r.costUsd ? `$${r.costUsd.toFixed(2)} spent` : "no spend recorded";
+			try {
+				// No budget passed: uncapped, and recorded. The ceiling is milestones, not dollars.
+				const state = await resumeMission(r.outDir, { maxMilestones: params.maxMilestones });
+				const sc = state.scoreCard;
+				const after = sc ? `${sc.assertionsPassed}/${sc.assertionsTotal} assertions, ${sc.bugs.length} bug(s)` : "no scorecard";
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Resumed ${r.id} (${r.repoName}). Before: ${before}. After: ${after}, verdict ${state.finalVerdict ?? "unknown"}, $${(state.costUsd ?? 0).toFixed(2)} total.`,
+						},
+					],
+				};
+			} catch (err) {
+				// A refusal is a real answer — report it verbatim rather than a hopeful summary.
+				return { content: [{ type: "text", text: `Could not resume ${r.id}: ${err instanceof Error ? err.message : String(err)}` }] };
+			}
+		},
+	} as unknown as AgentTool;
+
 	const boardTool = {
 		name: "board_hint",
 		label: "board",
@@ -326,6 +368,7 @@ export function buildTools(focus: () => string, runner: () => MissionRunner): Ag
 		createEditTool(cwd),
 		runMissionTool,
 		acceptTool,
+		resumeTool,
 		listTool,
 		workspacesTool,
 		investigateTool,
@@ -376,7 +419,10 @@ export function createChiefSession(homeCwd: string): ChiefSession {
 
 	let runnerRef: MissionRunner;
 	const agent = new Agent({
-		initialState: { systemPrompt: SYSTEM_PROMPT, model, thinkingLevel: "off", tools: buildTools(() => focus, () => runnerRef) },
+		// Thinking on. The chief now scaffolds repos, runs builds and reads failures — the work a
+		// pi session does, which a pi session does with thinking available. "off" was right when it
+		// only routed requests to other agents.
+		initialState: { systemPrompt: SYSTEM_PROMPT, model, thinkingLevel: "medium", tools: buildTools(() => focus, () => runnerRef) },
 		streamFn,
 		getApiKey: (provider) => getEnvApiKey(provider),
 	});

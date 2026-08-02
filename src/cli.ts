@@ -29,7 +29,8 @@ interface Flags {
 	target: string;
 	goal: string;
 	rfc: string;
-	budget: number;
+	/** Hard spending cap. undefined = uncapped, which is the default. */
+	budget: number | undefined;
 	maxFeatures: number;
 	maxMilestones: number;
 	queries: string[];
@@ -59,7 +60,7 @@ function parseArgs(argv: string[]): Flags {
 		target: process.cwd(),
 		goal: "",
 		rfc: "",
-		budget: 8,
+		budget: undefined,
 		maxFeatures: 1,
 		maxMilestones: 3,
 		queries: [],
@@ -136,7 +137,7 @@ Flags:
   --target <path>     Target repo to work on (default: cwd)
   --goal "<text>"     Mission goal (run)
   --rfc <@file|text>  What's wrong / what you want (@file to read a file)
-  --budget <usd>      Total USD budget (default: 8)
+  --budget <usd>      Hard spending cap (default: none — spend is recorded, not capped)
   --max-features <n>  Features executed per milestone (default: 1)
   --max-milestones <n> Corrective rounds before stopping for a human (default: 3)
   --query "<text>"    Briefing search query (repeatable; defaults to harness-design queries)
@@ -284,7 +285,7 @@ function openFile(path: string): void {
 async function runOne(config: MissionConfig, open: boolean): Promise<void> {
 	registerWorkspace(config.targetCwd);
 	process.stdout.write(
-		`${chalk.bold("mission")} → ${chalk.dim(config.targetCwd)} [${config.target}] budget $${config.budgetUsd} · ${config.routing.worker.provider}:${config.routing.worker.modelId}\n\n`,
+		`${chalk.bold("mission")} → ${chalk.dim(config.targetCwd)} [${config.target}] ${config.budgetUsd === undefined ? "uncapped" : `cap $${config.budgetUsd}`} · ${config.routing.worker.provider}:${config.routing.worker.modelId}\n\n`,
 	);
 	const state = await runMission(config, (e) => {
 		if (e.type === "status") process.stdout.write(`${chalk.cyan("▶")} ${chalk.bold(e.status)}\n`);
@@ -465,7 +466,7 @@ async function main(): Promise<void> {
 		}
 
 		const opts: import("./mission.js").ResumeMissionOpts = {};
-		if (f.budget !== 8) opts.budget = f.budget; // only set if explicitly passed
+		if (f.budget !== undefined) opts.budget = f.budget; // uncapped unless explicitly asked for
 		if (f.maxMilestones !== 3) opts.maxMilestones = f.maxMilestones; // only set if explicitly passed
 
 		process.stdout.write(`${chalk.bold("resume")} → ${chalk.dim(outDir)}\n\n`);

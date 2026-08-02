@@ -287,8 +287,20 @@ export interface ScopeCorrectionsOptions {
 	assertions: Assertion[];
 	scoreCard: ScoreCard;
 	handoffs: Handoff[];
+	/** Remaining spend under the cap, or Infinity when the mission is uncapped (the default). */
 	remainingUsd: number;
 	milestonesLeft: number;
+}
+
+/**
+ * How the budget line reads to the orchestrator.
+ *
+ * Uncapped is the normal case, and "$Infinity" is both ugly and an invitation. What actually
+ * constrains the orchestrator is the milestone count, so an uncapped mission says nothing about
+ * money and lets the ceiling do the talking.
+ */
+export function budgetLine(remainingUsd: number): string {
+	return Number.isFinite(remainingUsd) ? `Budget remaining: $${remainingUsd.toFixed(2)}. ` : "";
 }
 
 export async function scopeCorrections(options: ScopeCorrectionsOptions): Promise<MilestoneReview> {
@@ -331,7 +343,7 @@ ENGINEER'S RFC:
 ${config.rfc || "(none provided)"}
 
 MILESTONE ${milestone} JUST COMPLETED.
-Budget remaining: $${remainingUsd.toFixed(2)}. Milestones remaining after this boundary: ${milestonesLeft}.
+${budgetLine(remainingUsd)}Milestones remaining after this boundary: ${milestonesLeft}.
 
 VALIDATION CONTRACT RESULTS (${scoreCard.assertionsPassed}/${scoreCard.assertionsTotal} passed):
 ${assertionLines}

@@ -75,7 +75,7 @@ export interface RunWorkerOptions {
 	milestone: number;
 	cwd: string;
 	model: ModelSpec;
-	budgetUsd: number;
+	budgetUsd?: number;
 	/**
 	 * The mission env every bash command runs under. Without this, commands inherit the
 	 * daemon's ambient environment — whatever shell happened to start it — and Python
@@ -166,7 +166,11 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult
 				recent.push(said.slice(0, 1200));
 				if (recent.length > 10) recent.shift();
 			}
-			if (costUsd >= budgetUsd && !aborted) {
+			// Uncapped unless a cap was explicitly asked for. Aborting here kills the worker
+			// mid-turn: the money is already spent, and what gets committed is a half-written
+			// feature that then fails its own assertions. A cap that fires has cost more than
+			// no cap would have.
+			if (budgetUsd !== undefined && costUsd >= budgetUsd && !aborted) {
 				aborted = true;
 				agent.abort();
 			}

@@ -113,29 +113,39 @@ check("unreadable-state (stateReadable=false) → refused", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Branch 4: budget exhausted (no override)
+// Budget is NOT a refusal branch
+//
+// It used to be: a prior run that ended `budget-exhausted` was refused unless a human passed
+// --budget. That guard blocked the exact case resume exists for — an agent that has committed a
+// fix and needs it scored — while the resume path it did allow invented $10 of spend nobody
+// asked for. Spend is recorded; it does not gate.
 // ---------------------------------------------------------------------------
 
-check("budget-exhausted without opts.budget → refused", () => {
+check("budget-exhausted without opts.budget → allowed", () => {
 	const result = decideResume(
 		makeState({ finalVerdict: "budget-exhausted" }),
-		{},  // no budget override
+		{},  // no budget override, and none needed
 		healthyProbes({ finalVerdict: "budget-exhausted" }),
 	);
-	assert(result.ok === false, "should be refused");
-	assert(result.reason === "budget-exhausted", `expected budget-exhausted, got ${result.reason}`);
-	assert(typeof result.remedy === "string" && result.remedy.length > 0, "remedy must be non-empty");
-	assert(result.remedy.includes("budget") || result.remedy.includes("--budget"),
-		`remedy should mention budget, got: ${result.remedy}`);
+	assert(result.ok === true, "budget must not refuse a resume");
 });
 
-check("budget-exhausted WITH opts.budget → ok", () => {
+check("budget-exhausted WITH opts.budget → still allowed", () => {
 	const result = decideResume(
 		makeState({ finalVerdict: "budget-exhausted" }),
-		{ budget: 20 },  // budget override provided
+		{ budget: 20 },  // an explicit cap is honoured, not required
 		healthyProbes({ finalVerdict: "budget-exhausted" }),
 	);
-	assert(result.ok === true, "should pass when budget is overridden");
+	assert(result.ok === true, "should pass when a cap is supplied");
+});
+
+check("heavy prior spend does not refuse a resume", () => {
+	const result = decideResume(
+		makeState({ costUsd: 500 }),
+		{},
+		healthyProbes({ spentUsd: 500 }),
+	);
+	assert(result.ok === true, "no dollar figure may block a resume");
 });
 
 // ---------------------------------------------------------------------------
@@ -195,7 +205,6 @@ check("all refusals have non-empty reason AND remedy strings", () => {
 		decideResume(makeState(), {}, healthyProbes({ worktreeExists: false })),
 		decideResume(makeState(), {}, healthyProbes({ missionRunning: true })),
 		decideResume(null, {}, { worktreeExists: true, missionRunning: false, stateReadable: false, spentUsd: 0, milestoneCount: 0, finalVerdict: undefined }),
-		decideResume(makeState({ finalVerdict: "budget-exhausted" }), {}, healthyProbes({ finalVerdict: "budget-exhausted" })),
 		decideResume(makeState({ finalVerdict: "max-milestones" }), {}, healthyProbes({ finalVerdict: "max-milestones" })),
 	];
 	for (const r of refusalCases) {

@@ -97,16 +97,17 @@ export function decideResume(
 			remedy: "A process for this mission is already live. Wait for it to finish or stop it before resuming.",
 		};
 	}
-	// 4. Budget exhausted
-	// MissionState doesn't store budgetUsd directly — the caller probes spentUsd and finalVerdict.
-	// If the prior run ended due to budget and no override is supplied, refuse.
-	if (probes.finalVerdict === "budget-exhausted" && opts.budget === undefined) {
-		return {
-			ok: false,
-			reason: "budget-exhausted",
-			remedy: "Pass --budget <usd> to supply additional budget for the resumed run.",
-		};
-	}
+	// 4. Budget: no longer a refusal.
+	//
+	// This branch used to refuse a resume whose prior run ended `budget-exhausted` unless a human
+	// passed --budget. Two things were wrong with it. It blocked the one case resume exists for —
+	// an agent that has already committed a fix and needs it scored — behind a flag. And because
+	// MissionState never persisted the original cap, the resume that DID happen invented one
+	// (`opts.budget ?? 10`), so the guard refused the honest path and waved through $10 of
+	// unrequested spend on every other path.
+	//
+	// Spend is recorded, not rationed. A resume costs what it costs and the ledger says so.
+
 	// 5. Milestone ceiling reached
 	if (probes.finalVerdict === "max-milestones" && opts.maxMilestones === undefined) {
 		return {
@@ -164,7 +165,11 @@ async function runMilestoneLoop(ctx: MilestoneLoopContext): Promise<{ verdict: M
 		const liveThisMilestone: { workerId: string; release: () => void }[] = [];
 
 		for (const feature of queue) {
-			const remaining = config.budgetUsd - store.state.costUsd;
+			// Uncapped by default: `remaining` is Infinity, the break never fires, and the worker
+			// gets no ceiling to be truncated at. The loop is still bounded — maxFeatures per
+			// milestone × maxMilestones — so removing the cap does not make it unbounded, it just
+			// stops a dollar figure from deciding where a worker gets cut off.
+			const remaining = config.budgetUsd === undefined ? Number.POSITIVE_INFINITY : config.budgetUsd - store.state.costUsd;
 			if (remaining <= 0) {
 				emit("budget exhausted — stopping before next feature");
 				break;
@@ -178,7 +183,7 @@ async function runMilestoneLoop(ctx: MilestoneLoopContext): Promise<{ verdict: M
 				milestone: m,
 				cwd: workCwd,
 				model: config.routing.worker,
-				budgetUsd: Math.min(remaining, config.budgetUsd * 0.6),
+				budgetUsd: config.budgetUsd === undefined ? undefined : Math.min(remaining, config.budgetUsd * 0.6),
 				env: missionEnv,
 				scouts,
 				envDoctrine: schemaWarning ? `HARNESS WARNING: ${schemaWarning}` : undefined,
@@ -307,11 +312,12 @@ async function runMilestoneLoop(ctx: MilestoneLoopContext): Promise<{ verdict: M
 			break;
 		}
 
-		const remainingUsd = config.budgetUsd - store.state.costUsd;
-		if (remainingUsd < config.budgetUsd * MILESTONE_BUDGET_FLOOR) {
+		const cap = config.budgetUsd;
+		const remainingUsd = cap === undefined ? Number.POSITIVE_INFINITY : cap - store.state.costUsd;
+		if (cap !== undefined && remainingUsd < cap * MILESTONE_BUDGET_FLOOR) {
 			verdict = "budget-exhausted";
 			record.verdict = verdict;
-			record.assessment = `Stopped at the budget floor with $${remainingUsd.toFixed(2)} left of $${config.budgetUsd.toFixed(2)}.`;
+			record.assessment = `Stopped at the budget floor with $${remainingUsd.toFixed(2)} left of $${cap.toFixed(2)}.`;
 			store.state.milestones.push(record);
 			store.save();
 			emit(`milestone ${m}: budget floor reached ($${remainingUsd.toFixed(2)} left) — needs you`);
@@ -887,14 +893,19 @@ export async function resumeMission(
 	const store = storeOrNull!;
 
 	// Build a config from stored state, overriding budget/milestones as requested.
+	//
+	// No invented budget. This used to be `opts.budget ?? opts.extraBudget ?? 10`, which meant a
+	// bare `missions resume` silently authorised $10 of additional spend that nobody asked for —
+	// and it had to invent a number because MissionState never persisted the original cap. An
+	// explicit --budget is still honoured as a hard cap; the default is uncapped and recorded.
 	const spentSoFar = state!.costUsd;
-	const additionalBudget = opts.budget ?? opts.extraBudget ?? 10;
+	const additionalBudget = opts.budget ?? opts.extraBudget;
 	const config: MissionConfig = {
 		goal: state!.goal,
 		rfc: state!.rfc ?? "",
 		targetCwd: state!.targetCwd,
 		branch: state!.branch ?? `missions/${state!.id}`,
-		budgetUsd: spentSoFar + additionalBudget,
+		budgetUsd: additionalBudget === undefined ? undefined : spentSoFar + additionalBudget,
 		outDir,
 		routing: state!.routing ?? { worker: { provider: "anthropic", modelId: "claude-opus-4-5" }, orchestrator: { provider: "anthropic", modelId: "claude-opus-4-5" }, bugSpotter: { provider: "anthropic", modelId: "claude-opus-4-5" } },
 		maxFeatures: 1,
@@ -1042,7 +1053,7 @@ export async function resumeMission(
 			if (resumeQueue.length === 0) {
 				// Re-scope from orchestrator.
 				emit("no pending corrections — asking orchestrator to re-scope…");
-				const remaining = config.budgetUsd - store.state.costUsd;
+				const remaining = config.budgetUsd === undefined ? Number.POSITIVE_INFINITY : config.budgetUsd - store.state.costUsd;
 				const review = await scopeCorrections({
 					config,
 					milestone: store.state.milestones.length,

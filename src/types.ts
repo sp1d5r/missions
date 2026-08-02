@@ -277,7 +277,21 @@ export interface MissionConfig {
 	targetCwd: string;
 	/** Work branch created in the target repo; never commit to main directly. */
 	branch: string;
-	budgetUsd: number;
+	/**
+	 * Hard spending cap, or undefined for uncapped.
+	 *
+	 * Uncapped is the default. A cap does not make a mission cheaper — it truncates a worker
+	 * mid-turn and commits whatever half-finished state exists, so the money is spent AND the
+	 * work is unusable. Worse, it produced a `budget-exhausted` verdict that reads on the board
+	 * as "this needs you" when nothing was actually wrong with the work.
+	 *
+	 * Spend is always RECORDED (state.costUsd, handoff.costUsd, the registry, the board total)
+	 * whether or not there is a cap. Recording is what a human needs to decide something;
+	 * a cap decides it for them, badly, at the least useful moment.
+	 *
+	 * Set it only when you deliberately want a run to stop dead at a number.
+	 */
+	budgetUsd?: number;
 	/** Where mission artifacts (state.json, report.html, log) are written. */
 	outDir: string;
 	routing: ModelRouting;

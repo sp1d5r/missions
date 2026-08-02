@@ -292,7 +292,7 @@ function workerTools(missionId: string, outDir: string): AgentTool[] {
 			"Returns { refused, reason, remedy, before, after, verdict } where refused=true means a guard blocked the resume (see reason+remedy). " +
 			"Do NOT call this while workers are still running.",
 		parameters: Type.Object({
-			budget: Type.Optional(Type.Number({ description: "Additional budget in USD to add on top of what was spent. Default: 10." })),
+			budget: Type.Optional(Type.Number({ description: "Hard cap in USD on top of what was already spent. Omit for uncapped — spend is recorded either way. Only set this if you specifically want the run to stop dead at a number." })),
 			maxMilestones: Type.Optional(Type.Number({ description: "New milestone ceiling (must be > current milestones completed). Default: current+3." })),
 		}),
 		async execute(_id: string, p: { budget?: number; maxMilestones?: number }) {

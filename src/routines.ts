@@ -41,8 +41,14 @@ export interface Routine {
 	queries?: string[];
 	/** bugbash: which part of the repo to hunt in, in plain words. */
 	scope?: string;
-	/** Ceiling for one run. A routine that cannot say no to itself is a subscription. */
-	maxUsd: number;
+	/**
+	 * Ceiling for one run, or undefined for uncapped.
+	 *
+	 * Recorded but never read — nothing in routine-run enforces it. Left declared because a
+	 * routine is the one thing here that spends without being asked, so the field is worth
+	 * keeping honest rather than deleting; it should be wired up, not quietly dropped.
+	 */
+	maxUsd?: number;
 	lastRunAt?: string;
 	lastSummary?: string;
 }
