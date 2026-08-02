@@ -153,7 +153,18 @@ function unknownRepo(ref: string): { content: { type: "text"; text: string }[] }
  * here are the difference between a colleague and a narrator, and a silent regression to read-only
  * looks exactly like the model being unhelpful.
  */
-export function buildTools(focus: () => string, runner: () => MissionRunner): AgentTool[] {
+export function buildTools(
+	focus: () => string,
+	runner: () => MissionRunner,
+	/**
+	 * Say something to whoever is attached, without it being a turn of conversation.
+	 *
+	 * Long-running tools are otherwise invisible: `tool_execution_start` prints one line and the
+	 * next thing anyone sees is the answer. A six-minute scout fan-out and a hung socket look
+	 * identical from the console. Optional so a test can build the tool set without a session.
+	 */
+	note?: (msg: string) => void,
+): AgentTool[] {
 	const runMissionTool = {
 		name: "run_mission",
 		label: "run mission",
@@ -239,6 +250,9 @@ export function buildTools(focus: () => string, runner: () => MissionRunner): Ag
 				cwd: ws.path,
 				specs: loadAgentSpecs(ws.path),
 				tasks: questions.map((task) => ({ agent: "scout", task })),
+				// Without this the console showed `· investigate` and then nothing for however
+				// long the slowest scout took — six minutes, in the run that prompted this.
+				onProgress: note,
 			});
 			const text = results.map((r) => (r.ok ? `## ${r.task}\n${r.output}` : `## ${r.task}\nFAILED — ${r.error ?? "unknown"}`)).join("\n\n");
 			const spent = results.reduce((n, r) => n + r.costUsd, 0);
@@ -423,12 +437,20 @@ export function createChiefSession(homeCwd: string): ChiefSession {
 		for (const l of listeners) l(text);
 	};
 
+	/** Progress from a tool, dimmed and indented to sit under the `· toolname` line. */
+	const chiefNote = (msg: string): void => emit(chalk.dim(`    ${msg}\n`));
+
 	let runnerRef: MissionRunner;
 	const agent = new Agent({
 		// Thinking on. The chief now scaffolds repos, runs builds and reads failures — the work a
 		// pi session does, which a pi session does with thinking available. "off" was right when it
 		// only routed requests to other agents.
-		initialState: { systemPrompt: SYSTEM_PROMPT, model, thinkingLevel: "medium", tools: buildTools(() => focus, () => runnerRef) },
+		initialState: {
+			systemPrompt: SYSTEM_PROMPT,
+			model,
+			thinkingLevel: "medium",
+			tools: buildTools(() => focus, () => runnerRef, chiefNote),
+		},
 		streamFn,
 		getApiKey: (provider) => getEnvApiKey(provider),
 	});
@@ -503,7 +525,7 @@ export function createChiefSession(homeCwd: string): ChiefSession {
 			registerWorkspace(full);
 			publishFocus(full);
 			// Read tools are bound to a cwd at construction, so they are rebuilt to follow.
-			agent.state.tools = buildTools(() => focus, () => runnerRef);
+			agent.state.tools = buildTools(() => focus, () => runnerRef, chiefNote);
 			emit(chalk.dim(`  · focus → ${basename(full)}\n`));
 		},
 		notify(text: string) {

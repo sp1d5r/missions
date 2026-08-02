@@ -225,6 +225,13 @@ export interface DispatchOptions {
 	/** Seat the scouts run on. Falls back to the spec's own model, then the SDK default. */
 	model?: ModelSpec;
 	signal?: AbortSignal;
+	/**
+	 * Called as scouts start and finish, so a caller can show that something is happening.
+	 *
+	 * A fan-out is the longest silence in the product: six minutes of nothing is indistinguishable
+	 * from a hang, and the reader has no way to tell which. Every message here is one line, already
+	 * formatted for a log — the caller decides where it goes.
+	 */
 	onProgress?: (msg: string) => void;
 }
 
@@ -233,6 +240,10 @@ export async function dispatchScouts(options: DispatchOptions): Promise<ScoutRes
 	const { cwd, specs, model, signal, onProgress } = options;
 	const tasks = options.tasks.slice(0, MAX_SCOUTS);
 	const { runAgent, registry: reg } = await loadEngine();
+	const total = tasks.length;
+	let finished = 0;
+
+	if (onProgress && total > 0) onProgress(`${total} scout(s) reading…`);
 
 	return Promise.all(
 		tasks.map(async (t): Promise<ScoutResult> => {
@@ -243,19 +254,30 @@ export async function dispatchScouts(options: DispatchOptions): Promise<ScoutRes
 				model: spec.model ?? (model ? `${model.provider}/${model.modelId}` : undefined),
 			};
 			onProgress?.(`scout ${spec.name}: ${t.task.slice(0, 60)}`);
+			// Reported the moment each one lands rather than after Promise.all, so a slow scout
+			// shows the others already home instead of hiding them behind itself.
+			const done = (note: string) => {
+				finished++;
+				onProgress?.(`  ${finished}/${total} ${spec.name} — ${note}`);
+			};
 			try {
 				const r = await runAgent(resolved, t.task, cwd, reg, signal);
 				const ok = r.exitCode === 0 && r.stopReason !== "error" && r.stopReason !== "aborted";
+				const output = finalText(r.messages) || "(no output)";
+				const cost = r.usage?.cost ?? 0;
+				done(ok ? `${output.length} chars, $${cost.toFixed(3)}` : `FAILED: ${r.errorMessage ?? r.stopReason}`);
 				return {
 					agent: spec.name,
 					task: t.task,
 					ok,
-					output: finalText(r.messages) || "(no output)",
-					costUsd: r.usage?.cost ?? 0,
+					output,
+					costUsd: cost,
 					turns: r.usage?.turns ?? 0,
 					error: ok ? undefined : (r.errorMessage ?? r.stopReason),
 				};
 			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				done(`FAILED: ${message}`);
 				return {
 					agent: spec.name,
 					task: t.task,
@@ -263,7 +285,7 @@ export async function dispatchScouts(options: DispatchOptions): Promise<ScoutRes
 					output: "",
 					costUsd: 0,
 					turns: 0,
-					error: err instanceof Error ? err.message : String(err),
+					error: message,
 				};
 			}
 		}),
