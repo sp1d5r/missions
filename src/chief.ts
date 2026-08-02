@@ -1,4 +1,4 @@
-import { createReadOnlyTools } from "@earendil-works/pi-coding-agent";
+import { createBashTool, createEditTool, createReadOnlyTools, createWriteTool } from "@earendil-works/pi-coding-agent";
 import { Agent, getEnvApiKey, getModel, streamFn, type AgentEvent, type AgentMessage, type AgentTool } from "./pi.js";
 import { basename, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -23,6 +23,15 @@ Workspaces:
 - Call list_workspaces when you need to know what exists, or when the user names a repo you cannot place.
 - Missions in different repos run concurrently and land on their own branches, so "fix X in nadine and Y in missions" is one exchange, not two sessions.
 
+Your own hands (read, grep, find, ls, bash, write, edit):
+- These run on the user's machine as the user, with the WHOLE filesystem in reach. Relative paths resolve against the repo they are attached from; absolute paths go anywhere. You never need to say you are unable to look at, run, or change something.
+- Use them for SETUP and for anything deterministic: create a directory, git init, scaffold a project, npm/pnpm install, run a build or a test, read a log, make a commit, check whether something actually works.
+- Do NOT use them to build the product. Writing a feature by hand is one agent doing serial work with no plan, no contract, and no validation. Dispatch a mission for that — the whole point of the org is that features arrive with assertions proving they run.
+- The line: you get the repo to the point where a mission CAN run, then dispatch. Roughly — scaffold and commit by hand, features by mission.
+- Starting a new project, in order: create the directory, git init, write the minimum skeleton (package.json/README/.gitignore, whatever the stack needs), install and verify the toolchain runs, then \`git add -A && git commit\`. THEN dispatch missions with repo set to the new directory's absolute path — it registers itself on first use.
+- A repo with ZERO commits cannot host a mission. Missions run in git worktrees branched off a ref, and an empty repo has no ref. The first commit is yours, always.
+- Destructive commands are yours to get right: no rm -rf outside a directory you created, no force-push, no touching anything under the user's home you were not asked about. When a command would delete or overwrite something you did not make, say what you are about to do and let them answer first.
+
 How to behave:
 - Infer intent. Propose a crisp plan in 1-2 lines. When the ask is clear, call run_mission to dispatch a worker — it runs in the BACKGROUND, so say you've kicked it off and keep talking.
 - Missions run in PARALLEL, each in its own git worktree (a few at once). Dispatch several pieces of work concurrently.
@@ -30,7 +39,7 @@ How to behave:
   listing. Those have their own tools (accept_mission, reclaim_disk, list_missions). A worker cannot run git at all,
   so a mission asked to merge will produce a document describing a merge instead of doing one.
 - Ask a clarifying question ONLY when you truly cannot proceed. One question, never a checklist. The exception: if you cannot tell WHICH repo the user means, ask — dispatching into the wrong repo is expensive to undo.
-- You can read the current repo directly (read/grep/find/ls). For any OTHER repo, use investigate — it sends read-only scouts and returns their answers without filling your context.
+- For reading a repo OTHER than the one in front of you at any depth, prefer investigate — it sends read-only scouts and returns their answers without filling your context.
 - Keep every reply short and skimmable. No walls of text.
 - When a mission finishes you'll get a "[mission-complete]" note — relay the result in 2-3 lines and say which repo it was. Report ONLY what the note says: if it does not say a review opened, do not claim one did.
 
@@ -137,7 +146,12 @@ function unknownRepo(ref: string): { content: { type: "text"; text: string }[] }
 	return { content: [{ type: "text", text: `No workspace matches "${ref}" (or it is ambiguous). Known: ${workspaceNames()}. Ask the user which one, or pass a full path.` }] };
 }
 
-function buildTools(focus: () => string, runner: () => MissionRunner): AgentTool[] {
+/**
+ * The chief's tool set. Exported so a test can assert what the chief can actually do — the grants
+ * here are the difference between a colleague and a narrator, and a silent regression to read-only
+ * looks exactly like the model being unhelpful.
+ */
+export function buildTools(focus: () => string, runner: () => MissionRunner): AgentTool[] {
 	const runMissionTool = {
 		name: "run_mission",
 		label: "run mission",
@@ -294,8 +308,30 @@ function buildTools(focus: () => string, runner: () => MissionRunner): AgentTool
 		},
 	} as unknown as AgentTool;
 
-	// Direct read tools follow the focus repo; everything else takes a repo argument.
-	return [...createReadOnlyTools(focus()), runMissionTool, acceptTool, listTool, workspacesTool, investigateTool, gcTool, boardTool];
+	// Direct filesystem tools follow the focus repo; everything else takes a repo argument.
+	//
+	// bash/write/edit, not just read. The chief was read-only, which made it unable to do the
+	// setup work that has to happen BEFORE there is anything to dispatch a mission at: create a
+	// directory, `git init`, scaffold, install dependencies, make the first commit. It would
+	// correctly explain that it could not, which is not what a chief of staff is for.
+	//
+	// `cwd` here is the base for RELATIVE paths only — it is not a jail. Absolute paths resolve
+	// anywhere, and bash can cd. That is deliberate: the reach is the whole disk, as the user's
+	// own account. Treat every one of these as the user typing it into their own terminal.
+	const cwd = focus();
+	return [
+		...createReadOnlyTools(cwd),
+		createBashTool(cwd),
+		createWriteTool(cwd),
+		createEditTool(cwd),
+		runMissionTool,
+		acceptTool,
+		listTool,
+		workspacesTool,
+		investigateTool,
+		gcTool,
+		boardTool,
+	];
 }
 
 export interface ChiefSession {
