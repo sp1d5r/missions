@@ -10,3 +10,4 @@ export { discoverEnvFiles, topLevelRecon } from "./target/index.js";
 export { runSetup, observeProduced, findSetupDoc } from "./setup.js";
 export { DEFAULT_ROUTING, ANTHROPIC_ONLY_ROUTING, autoRouting, parseModelSpec } from "./models.js";
 export * from "./types.js";
+export { openStore } from "./store-api.js";

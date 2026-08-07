@@ -16,9 +16,8 @@
  * Exit 0 on success, non-zero on failure.
  */
 
-import { mkdirSync, existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
-import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 
@@ -30,6 +29,7 @@ const { createScreenshotTool } = await import(join(repoRoot, "dist/worker/tools/
 const { extractImageParts } = await import(join(repoRoot, "dist/worker.js"));
 const { StateStore } = await import(join(repoRoot, "dist/state.js"));
 const { generateReport } = await import(join(repoRoot, "dist/report.js"));
+const { writeActive } = await import(join(repoRoot, "dist/registry.js"));
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -244,6 +244,31 @@ writeFileSync(join(e2eDir, "mission-id"), missionId, "utf-8");
 writeFileSync(join(e2eDir, "out-dir"), outDir, "utf-8");
 console.log(`[e2e] wrote mission-id: ${missionId}`);
 console.log(`[e2e] wrote out-dir: ${outDir}`);
+
+// Register the mission in the active registry so the web console's record(id)
+// lookup, /api/m/[id]/images/[file] route, and store list API can find it.
+try {
+  writeActive({
+    id: missionId,
+    repo: repoRoot,
+    repoName: "missions",
+    goal: store.state.goal,
+    status: store.state.status,
+    startedAt: store.state.startedAt,
+    updatedAt: new Date().toISOString(),
+    lastActivity: "e2e-screenshot complete",
+    reportPath,
+    costUsd: 0,
+    done: true,
+    verdict: store.state.finalVerdict,
+    outcome: store.state.outcome,
+    outDir,
+  });
+  console.log(`[e2e] registered mission in active store`);
+} catch (err) {
+  // Non-fatal — the registry may not be writable in all environments.
+  console.warn(`[e2e] warn: could not register in active store: ${err.message}`);
+}
 
 // ---------------------------------------------------------------------------
 // Summary
