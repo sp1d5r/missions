@@ -1,7 +1,7 @@
 export { runMission, resumeMission, decideResume, isHarnessStale } from "./mission.js";
 export type { MissionEvent, ResumeOpts, ResumeProbes, DecideResumeResult, ResumeMissionOpts } from "./mission.js";
 export { planMission } from "./orchestrator.js";
-export { runWorker } from "./worker.js";
+export { runWorker, extractImageParts, getWorkerTool, createScreenshotTool } from "./worker.js";
 export { runValidators } from "./validators/index.js";
 export { generateReport } from "./report.js";
 export { runChief } from "./chief.js";

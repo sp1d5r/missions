@@ -3,10 +3,15 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { type AgentSpec, createDelegateTool } from "./subagent.js";
 import { Agent, getEnvApiKey, getModel, streamFn, type AgentEvent, type AgentMessage, type AssistantMessage } from "./pi.js";
-import { createScreenshotTool } from "./worker/tools/screenshot.js";
+import { createScreenshotTool, type ScreenshotToolOptions, type ScreenshotParams, type ScreenshotResult } from "./worker/tools/screenshot.js";
 import { parseJson } from "./llm.js";
 import { registerWorker } from "./workers.js";
+import type { AgentTool } from "./pi.js";
 import type { Assertion, CommandRecord, Feature, Handoff, HandoffIssue, ModelSpec } from "./types.js";
+
+// Re-export screenshot tool factory so callers can import it from worker.ts
+export { createScreenshotTool };
+export type { ScreenshotToolOptions, ScreenshotParams, ScreenshotResult };
 
 const SYSTEM_PROMPT = `You are a CODING WORKER in an autonomous engineering org.
 You have a clean context and full read/edit/write/bash tools scoped to the target repository.
@@ -408,6 +413,39 @@ export function extractImageParts(result: unknown, toolName: string): Array<{ da
 		}
 	}
 	return out;
+}
+
+/**
+ * The built-in worker tools, keyed by stable name.
+ *
+ * This registry exists so external callers (tests, validators, future missions)
+ * can look up a tool by name without having to know its module path:
+ *
+ *   const tool = getWorkerTool('screenshot');
+ *   const result = await tool.execute('call-1', { url: 'data:text/html,<h1>ok</h1>' });
+ *
+ * Tools are created fresh on each call so opts can be supplied per-caller.
+ */
+const WORKER_TOOL_FACTORIES: Record<string, (opts?: unknown) => AgentTool & Record<string, unknown>> = {
+	screenshot: (opts?: unknown) => createScreenshotTool(opts as ScreenshotToolOptions | undefined) as unknown as AgentTool & Record<string, unknown>,
+};
+
+/**
+ * Look up a built-in worker tool by its stable registered name.
+ *
+ * Returns the tool object (with `.name`, `.execute()`, and `.run()` if applicable),
+ * or `undefined` if the name is not registered.
+ *
+ * Usage:
+ *   const tool = getWorkerTool('screenshot');
+ *   const result = await tool?.execute('id', { url: '...' });
+ *
+ * The `opts` parameter is forwarded to the tool factory — for the screenshot tool
+ * this is a `ScreenshotToolOptions` object (e.g. `{ attachImage: ... }`).
+ */
+export function getWorkerTool(name: string, opts?: unknown): (AgentTool & Record<string, unknown>) | undefined {
+	const factory = WORKER_TOOL_FACTORIES[name];
+	return factory ? factory(opts) : undefined;
 }
 
 /** Recover a bash exit code from a tool result. Non-zero exits surface as an error with a marker. */
