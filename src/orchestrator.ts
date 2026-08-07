@@ -244,8 +244,7 @@ Output ONLY a JSON object, no prose:
   "issueRulings": [
     { "summary": "must match the issue summary verbatim", "disposition": "addressed", "correctionId": "c1", "note": "why" },
     { "summary": "...", "disposition": "deferred", "evidenceAssertionId": "a3", "note": "a3 exercises this path end to end" },
-    { "summary": "...", "disposition": "deferred", "outOfScope": true, "note": "the RFC explicitly excludes this" },
-    { "summary": "must match the issue summary verbatim", "disposition": "deferred", "note": "why it is safe to leave" }
+    { "summary": "must match the issue summary verbatim", "disposition": "deferred", "outOfScope": true, "note": "the RFC explicitly excludes this" }
   ],
   "newAssertions": [
     { "id": "a7", "statement": "observable claim that must hold", "strength": "behavioural",
@@ -301,6 +300,48 @@ export interface ScopeCorrectionsOptions {
  */
 export function budgetLine(remainingUsd: number): string {
 	return Number.isFinite(remainingUsd) ? `Budget remaining: $${remainingUsd.toFixed(2)}. ` : "";
+}
+
+/**
+ * Turn the orchestrator's raw `issueRulings` JSON into typed `CorrectionRuling`s.
+ *
+ * Pure and exported specifically so this can be unit-tested against realistic raw model output
+ * without mocking an LLM call — the bug this guards against (evidenceAssertionId/outOfScope
+ * declared on the type, read by applyRulings() in mission.ts, but never actually copied off
+ * `raw` here) was invisible to the type checker because both fields are optional: an object
+ * literal that simply omits them is fully valid TypeScript. Only a test that round-trips real
+ * JSON through this function and checks the field survived would have caught it.
+ */
+export function parseIssueRulings(rawRulings: unknown[], idMap: Map<string, string>): CorrectionRuling[] {
+	return rawRulings.flatMap((raw): CorrectionRuling[] => {
+		const r = raw as {
+			summary?: unknown;
+			disposition?: unknown;
+			correctionId?: unknown;
+			evidenceAssertionId?: unknown;
+			outOfScope?: unknown;
+			note?: unknown;
+		};
+		const summary = typeof r?.summary === "string" ? r.summary.trim() : "";
+		// Closed value set. Anything else is dropped rather than guessed at: an unrecognised
+		// disposition coerced to "addressed" would close an issue nobody ruled on. Dropping
+		// leaves it open, which blocks the pass — the safe direction to fail in.
+		const disposition: IssueDisposition | undefined =
+			r?.disposition === "addressed" || r?.disposition === "deferred" ? r.disposition : undefined;
+		if (!summary || !disposition) return [];
+		const given = typeof r?.correctionId === "string" ? r.correctionId.trim() : "";
+		const evidenceGiven = typeof r?.evidenceAssertionId === "string" ? r.evidenceAssertionId.trim() : "";
+		return [
+			{
+				summary,
+				disposition,
+				correctionId: given ? (idMap.get(given) ?? given) : undefined,
+				evidenceAssertionId: evidenceGiven || undefined,
+				outOfScope: r?.outOfScope === true,
+				note: typeof r?.note === "string" ? r.note : undefined,
+			},
+		];
+	});
 }
 
 export async function scopeCorrections(options: ScopeCorrectionsOptions): Promise<MilestoneReview> {
@@ -407,25 +448,7 @@ Assess, rule on the issues, and scope corrections now. At most ${config.maxFeatu
 		.filter((f) => f.description.trim().length > 0);
 
 	const rawRulings = Array.isArray(parsed.issueRulings) ? parsed.issueRulings : [];
-	const issueRulings: CorrectionRuling[] = rawRulings.flatMap((raw): CorrectionRuling[] => {
-		const r = raw as { summary?: unknown; disposition?: unknown; correctionId?: unknown; note?: unknown };
-		const summary = typeof r?.summary === "string" ? r.summary.trim() : "";
-		// Closed value set. Anything else is dropped rather than guessed at: an unrecognised
-		// disposition coerced to "addressed" would close an issue nobody ruled on. Dropping
-		// leaves it open, which blocks the pass — the safe direction to fail in.
-		const disposition: IssueDisposition | undefined =
-			r?.disposition === "addressed" || r?.disposition === "deferred" ? r.disposition : undefined;
-		if (!summary || !disposition) return [];
-		const given = typeof r?.correctionId === "string" ? r.correctionId.trim() : "";
-		return [
-			{
-				summary,
-				disposition,
-				correctionId: given ? (idMap.get(given) ?? given) : undefined,
-				note: typeof r?.note === "string" ? r.note : undefined,
-			},
-		];
-	});
+	const issueRulings = parseIssueRulings(rawRulings, idMap);
 
 	// New assertions are capped and coerced. An id that collides with an existing one is dropped
 	// rather than allowed to overwrite it — the ratchet must not be defeated by reusing an id.
