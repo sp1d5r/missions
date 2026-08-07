@@ -501,24 +501,40 @@ export function createOverseerSession(outDir: string, options: OverseerOptions =
 			const t = text.trim();
 			if (!t) return "";
 			appendChatEntry(outDir, { role: "user", text: t, at: new Date().toISOString() });
-			const chunks: string[] = [];
-			const cb = (chunk: string): void => {
-				chunks.push(chunk);
+
+			const oneTurn = async (msg: AgentMessage): Promise<string> => {
+				const chunks: string[] = [];
+				const cb = (chunk: string): void => {
+					chunks.push(chunk);
+				};
+				listeners.add(cb);
+				try {
+					await runTurn(msg);
+				} finally {
+					listeners.delete(cb);
+				}
+				// The stream is written for a terminal, so it carries colour codes and the speaker
+				// label the caller already renders itself.
+				return chunks
+					.join("")
+					// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI is the point
+					.replace(/\x1b\[[0-9;]*m/g, "")
+					.replace(/^\s*overseer\s*/, "")
+					.trim();
 			};
-			listeners.add(cb);
-			try {
-				await runTurn({ role: "user", content: [{ type: "text", text: t }], timestamp: Date.now() } as AgentMessage);
-			} finally {
-				listeners.delete(cb);
+
+			let answer = await oneTurn({ role: "user", content: [{ type: "text", text: t }], timestamp: Date.now() } as AgentMessage);
+			// A turn can complete with no error and no text at all — an empty model
+			// completion, not a crash, so runTurn's catch never sees it. Retrying once
+			// is cheap and clears it most of the time; a second blank in a row is
+			// probably a real problem worth surfacing rather than masking forever.
+			if (!answer) {
+				answer = await oneTurn({
+					role: "user",
+					content: [{ type: "text", text: "(no reply came back — please answer the previous question)" }],
+					timestamp: Date.now(),
+				} as AgentMessage);
 			}
-			// The stream is written for a terminal, so it carries colour codes and the speaker
-			// label the caller already renders itself.
-			const answer = chunks
-				.join("")
-				// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI is the point
-				.replace(/\x1b\[[0-9;]*m/g, "")
-				.replace(/^\s*overseer\s*/, "")
-				.trim();
 			if (answer) appendChatEntry(outDir, { role: "overseer", text: answer, at: new Date().toISOString() });
 			return answer;
 		},
