@@ -2,6 +2,7 @@ import { UserButton } from "@clerk/nextjs";
 import { Suspense } from "react";
 import { ago, toneFor } from "@/components/chrome";
 import { ChanList, Rail, type ChanItem } from "@/components/shell-nav";
+import { Heartbeat } from "@/components/heartbeat";
 import { board, summary, workspaces } from "@/lib/data";
 import type { Operator } from "@/lib/guard";
 
@@ -54,6 +55,7 @@ export function Shell({
 									{tally.stalled > 0 && <span className="tally-bad"> · {tally.stalled} stalled</span>} · ${tally.spendUsd.toFixed(2)}
 							</div>
 						</div>
+						<Heartbeat />
 						<UserButton />
 					</div>
 					{!op.pinned && (

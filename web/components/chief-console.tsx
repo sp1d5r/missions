@@ -27,9 +27,14 @@ interface Block {
  * The daemon prefixes a reply with its own speaker label ("chief\n"), which we
  * already render as the message author — leaving it in the body printed the
  * name twice. Stripped only at the very start, and only for that role.
+ *
+ * The daemon's output is chalk-colored for a terminal (bold/dim/color escape
+ * codes around tool names like `bash`), and broadcasts the same bytes to
+ * every attached client — so without stripping them here, the web console
+ * renders the raw `\x1b[1m`/`\x1b[36m` sequences as literal text.
  */
 function clean(b: Block): string {
-	const t = b.text.replace(/^\n+/, "");
+	const t = b.text.replace(/^\n+/, "").replace(/\x1b\[[0-9;]*m/g, "");
 	return b.role === "chief" ? t.replace(/^chief[ \t]*\n?/, "") : t;
 }
 

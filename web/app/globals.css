@@ -120,6 +120,14 @@ blockquote {
 
 .dot { display: inline-block; width: 6px; height: 6px; margin-right: 8px; vertical-align: middle; }
 
+/* The org's pulse — see components/heartbeat.tsx. */
+.heartbeat { display: flex; align-items: center; gap: 5px; margin-right: 14px; font-size: 10px; text-transform: uppercase; letter-spacing: .09em; color: var(--text-dim); }
+.heartbeat-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; }
+.hb-up { background: var(--ok); }
+.hb-down { background: var(--bad); animation: hb-pulse 1.2s ease-in-out infinite; }
+.hb-unknown { background: var(--text-dim); }
+@keyframes hb-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+
 /* Alert band: only rendered when there is genuinely something outstanding. */
 .alert { border: 1px solid var(--warn); padding: 12px 14px; margin: 16px 0; }
 .alert .label { color: var(--warn); }

@@ -12,7 +12,6 @@
  * whatever terminal you had open. So `attach()` is read-only by construction,
  * and focus only moves when the operator asks for it in `setFocus()`.
  */
-import { existsSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import { drainFrames, encode, orgSocketPath, type Frame } from "@missions/ipc.js";
 
@@ -20,8 +19,29 @@ export function socketPath(): string {
 	return orgSocketPath();
 }
 
-export function daemonUp(): boolean {
-	return existsSync(orgSocketPath());
+/**
+ * Actually dials the socket rather than checking whether the file exists.
+ *
+ * A crashed daemon leaves its socket file behind — an `existsSync` check
+ * reported "up" for a daemon that had been dead for hours, which is exactly
+ * how it went unnoticed. Connecting and immediately hanging up is the only
+ * way to know something is listening on the other end.
+ */
+export function daemonUp(): Promise<boolean> {
+	return new Promise((resolve) => {
+		let settled = false;
+		const finish = (up: boolean) => {
+			if (settled) return;
+			settled = true;
+			sock.destroy();
+			resolve(up);
+		};
+		const sock = createConnection(orgSocketPath());
+		sock.setTimeout(1500);
+		sock.once("connect", () => finish(true));
+		sock.once("error", () => finish(false));
+		sock.once("timeout", () => finish(false));
+	});
 }
 
 function connect(): Promise<Socket> {

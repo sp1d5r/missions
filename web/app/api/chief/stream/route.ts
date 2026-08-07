@@ -79,7 +79,7 @@ export async function GET(req: Request) {
 			let firstAttach = true;
 			try {
 				while (!abort.signal.aborted && open) {
-					if (!daemonUp()) {
+					if (!(await daemonUp())) {
 						if (!announcedDown) {
 							send("down", { at: new Date().toISOString() });
 							announcedDown = true;

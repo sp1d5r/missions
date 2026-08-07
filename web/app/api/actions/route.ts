@@ -53,7 +53,7 @@ export async function POST(req: Request) {
 		return Response.json({ ok: true, said: "cleared" });
 	}
 
-	if (!daemonUp()) {
+	if (!(await daemonUp())) {
 		return Response.json(
 			{ error: "no daemon — start the org with `missions chat` on the host" },
 			{ status: 503 },
