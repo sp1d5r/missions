@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { missionsPath } from "./paths.js";
+import { encode, orgSocketPath } from "./ipc.js";
+import { createConnection } from "node:net";
 
 const ACTIVE_DIR = (): string => missionsPath("active");
 
@@ -81,9 +83,56 @@ export function isStalled(rec: ActiveRecord, now = Date.now()): boolean {
 	return !rec.done && !isLive(rec, now);
 }
 
+/**
+ * Emit a lifecycle frame to the daemon socket, if it is up.
+ * Silently no-ops when the socket is absent (CLI standalone path).
+ */
+function emitLifecycle(frame: Parameters<typeof encode>[0] & { t: "mission" }): void {
+	try {
+		if (!existsSync(orgSocketPath())) return;
+		const sock = createConnection(orgSocketPath());
+		sock.on("connect", () => {
+			try {
+				sock.write(encode(frame), () => sock.destroy());
+			} catch {
+				sock.destroy();
+			}
+		});
+		sock.on("error", () => { /* no-op */ });
+	} catch {
+		/* never crash the caller */
+	}
+}
+
 export function writeActive(rec: ActiveRecord): void {
 	mkdirSync(ACTIVE_DIR(), { recursive: true });
-	writeFileSync(join(ACTIVE_DIR(), `${rec.id}.json`), JSON.stringify(rec, null, 2));
+	const p = join(ACTIVE_DIR(), `${rec.id}.json`);
+	// Read the prior on-disk record before overwriting — this makes the
+	// dedup guard restart-safe: a fresh process re-writing an unchanged
+	// record sees the real previous state rather than treating every first
+	// write as a brand-new mission.
+	let prevStatus: string | undefined;
+	let prevDone: boolean | undefined;
+	try {
+		const prior = JSON.parse(readFileSync(p, "utf-8")) as ActiveRecord;
+		prevStatus = prior.status;
+		prevDone = prior.done;
+	} catch {
+		/* file absent on first write — prevStatus stays undefined */
+	}
+	writeFileSync(p, JSON.stringify(rec, null, 2));
+	// Emit a lifecycle frame only when the status or done flag actually changes.
+	const nextStatus = rec.status;
+	const nextDone = rec.done;
+	if (prevStatus === nextStatus) {
+		// Status unchanged — but if done just flipped false→true emit 'finished'.
+		if (prevDone === false && nextDone === true) {
+			emitLifecycle({ t: "mission", event: "finished", id: rec.id, at: Date.now(), status: nextStatus });
+		}
+		return;
+	}
+	const event = prevStatus === undefined ? "started" : nextDone ? "finished" : "status";
+	emitLifecycle({ t: "mission", event, id: rec.id, at: Date.now(), status: nextStatus });
 }
 
 /** Patch a record in place (e.g. mark it cleared/merged from the board). No-op if it's gone. */
@@ -106,6 +155,7 @@ export function removeActive(id: string): void {
 	} catch {
 		/* skip */
 	}
+	emitLifecycle({ t: "mission", event: "removed", id, at: Date.now() });
 }
 
 export function readActive(): ActiveRecord[] {

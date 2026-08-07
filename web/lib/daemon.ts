@@ -15,6 +15,8 @@
 import { createConnection, type Socket } from "node:net";
 import { drainFrames, encode, orgSocketPath, type Frame } from "@missions/ipc.js";
 
+export type { Frame };
+
 export function socketPath(): string {
 	return orgSocketPath();
 }
@@ -44,12 +46,35 @@ export function daemonUp(): Promise<boolean> {
 	});
 }
 
-function connect(): Promise<Socket> {
+/**
+ * `signal`, if given, aborts a connect attempt still in flight — not just the
+ * socket once it exists. Without this, a caller that registers its own abort
+ * listener only after `await connect()` resolves can hang past its own
+ * deadline for as long as the connect attempt takes (unbounded when the
+ * daemon is down or slow), which is exactly what let the board stream's
+ * segment timer stop actually segmenting.
+ */
+function connect(signal?: AbortSignal): Promise<Socket> {
 	return new Promise((resolve, reject) => {
+		if (signal?.aborted) {
+			reject(new Error("aborted"));
+			return;
+		}
 		const sock = createConnection(orgSocketPath());
 		sock.setEncoding("utf-8");
-		sock.once("connect", () => resolve(sock));
-		sock.once("error", reject);
+		const onAbort = () => {
+			sock.destroy();
+			reject(new Error("aborted"));
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
+		sock.once("connect", () => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve(sock);
+		});
+		sock.once("error", (err) => {
+			signal?.removeEventListener("abort", onAbort);
+			reject(err);
+		});
 	});
 }
 
@@ -58,7 +83,7 @@ function connect(): Promise<Socket> {
  * all, so attaching from a phone cannot disturb a terminal.
  */
 export async function* attach(signal: AbortSignal): AsyncGenerator<string> {
-	const sock = await connect();
+	const sock = await connect(signal);
 	signal.addEventListener("abort", () => sock.destroy(), { once: true });
 
 	let buffer = "";
@@ -118,4 +143,53 @@ export async function sendInput(text: string): Promise<void> {
  */
 export async function setFocus(repoPath: string): Promise<void> {
 	await send({ t: "hello", text: repoPath });
+}
+
+export type MissionLifecycleFrame = Extract<Frame, { t: "mission" }>;
+
+/**
+ * Attach to the daemon and yield parsed mission lifecycle frames as they arrive.
+ * Read-only: sends no frames at all. Reconnects with exponential backoff when
+ * the socket drops.
+ */
+export async function* subscribeLifecycle(signal: AbortSignal): AsyncGenerator<MissionLifecycleFrame> {
+	const sock = await connect(signal);
+	signal.addEventListener("abort", () => sock.destroy(), { once: true });
+
+	let buffer = "";
+	const pending: MissionLifecycleFrame[] = [];
+	let wake: (() => void) | null = null;
+	let closed = false;
+
+	sock.on("data", (chunk: string) => {
+		buffer += chunk;
+		const { frames, rest } = drainFrames(buffer);
+		buffer = rest;
+		for (const f of frames) {
+			if (f.t === "mission") pending.push(f as MissionLifecycleFrame);
+		}
+		wake?.();
+	});
+	const end = () => {
+		closed = true;
+		wake?.();
+	};
+	sock.on("close", end);
+	sock.on("error", end);
+
+	try {
+		while (!closed && !signal.aborted) {
+			if (pending.length === 0) {
+				await new Promise<void>((r) => {
+					wake = r;
+				});
+				wake = null;
+				continue;
+			}
+			const next = pending.shift();
+			if (next !== undefined) yield next;
+		}
+	} finally {
+		sock.destroy();
+	}
 }

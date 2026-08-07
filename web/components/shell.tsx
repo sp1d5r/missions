@@ -5,6 +5,7 @@ import { ChanList, Rail, type ChanItem } from "@/components/shell-nav";
 import { Heartbeat } from "@/components/heartbeat";
 import { board, summary, workspaces } from "@/lib/data";
 import type { Operator } from "@/lib/guard";
+import { BoardLive } from "@/components/BoardLive";
 
 /**
  * The app shell: rail, mission list, thread.
@@ -41,6 +42,7 @@ export function Shell({
 
 	return (
 		<div className="app" data-pane={pane}>
+			<BoardLive />
 			<Suspense fallback={<div className="rail" />}>
 				<Rail repos={workspaces().map((w) => ({ name: w.name, path: w.path }))} />
 			</Suspense>

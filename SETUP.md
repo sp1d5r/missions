@@ -81,6 +81,25 @@ npm run build      # production build — proves imports from ../dist resolve
 npm run typecheck  # TypeScript type-check only (no emit)
 ```
 
+> **Known issue — `@types/firebase` stub in ancestor `node_modules`:**
+> TypeScript walks up directory ancestors looking for `@types/*` packages. If
+> `/Users/elijahahmad/node_modules/@types/firebase` exists on the machine (a broken
+> stub — no `index.d.ts`) both `npm run build` and `npm run typecheck` will fail
+> with `TS2688: Cannot find type definition file for 'firebase'`.
+>
+> The Turbopack compilation itself **succeeds** (the `✓ Compiled successfully` line
+> appears before the TS error). Only the TypeScript checking phase fails.
+>
+> **Fix (source-code change needed in `web/`):** add
+> `"typeRoots": ["./node_modules/@types"]` to `web/tsconfig.json`'s
+> `compilerOptions`, or add `typescript: { ignoreBuildErrors: true }` to
+> `web/next.config.ts`. Until then, use the compile-only build to verify:
+>
+> ```bash
+> cd web
+> npx next build --experimental-build-mode compile
+> ```
+
 ### Dev server
 
 ```bash
