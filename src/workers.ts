@@ -283,7 +283,7 @@ export function workerClient(missionId: string) {
 				const { frames, rest } = drainFrames(buf);
 				buf = rest;
 				const out = frames.find((f) => f.t === "out");
-				if (out) {
+				if (out && out.t === "out") {
 					clearTimeout(timer);
 					try {
 						done(JSON.parse(out.text));

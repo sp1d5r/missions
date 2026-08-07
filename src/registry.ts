@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { missionsPath } from "./paths.js";
+import { encode, orgSocketPath } from "./ipc.js";
+import { createConnection } from "node:net";
 
 const ACTIVE_DIR = (): string => missionsPath("active");
 
@@ -81,9 +83,40 @@ export function isStalled(rec: ActiveRecord, now = Date.now()): boolean {
 	return !rec.done && !isLive(rec, now);
 }
 
+/**
+ * Emit a lifecycle frame to the daemon socket, if it is up.
+ * Silently no-ops when the socket is absent (CLI standalone path).
+ */
+function emitLifecycle(frame: Parameters<typeof encode>[0] & { t: "mission" }): void {
+	try {
+		if (!existsSync(orgSocketPath())) return;
+		const sock = createConnection(orgSocketPath());
+		sock.on("connect", () => {
+			try {
+				sock.write(encode(frame), () => sock.destroy());
+			} catch {
+				sock.destroy();
+			}
+		});
+		sock.on("error", () => { /* no-op */ });
+	} catch {
+		/* never crash the caller */
+	}
+}
+
+/** Cache of last-seen status per mission id, used to suppress duplicate emissions. */
+const _lastStatus = new Map<string, string>();
+
 export function writeActive(rec: ActiveRecord): void {
 	mkdirSync(ACTIVE_DIR(), { recursive: true });
 	writeFileSync(join(ACTIVE_DIR(), `${rec.id}.json`), JSON.stringify(rec, null, 2));
+	// Emit a lifecycle frame only when the status actually changes.
+	const prev = _lastStatus.get(rec.id);
+	const next = rec.status;
+	if (prev === next) return;
+	_lastStatus.set(rec.id, next);
+	const event = prev === undefined ? "started" : rec.done ? "finished" : "status";
+	emitLifecycle({ t: "mission", event, id: rec.id, at: Date.now(), status: next });
 }
 
 /** Patch a record in place (e.g. mark it cleared/merged from the board). No-op if it's gone. */
@@ -106,6 +139,8 @@ export function removeActive(id: string): void {
 	} catch {
 		/* skip */
 	}
+	_lastStatus.delete(id);
+	emitLifecycle({ t: "mission", event: "removed", id, at: Date.now() });
 }
 
 export function readActive(): ActiveRecord[] {

@@ -62,6 +62,13 @@ export async function runDaemon(homeCwd: string, socketPath: string): Promise<vo
 					registerWorkspace(f.text);
 					session.setFocus(f.text);
 				}
+				else if (f.t === "mission") {
+					// Lifecycle frame from registry — broadcast to all OTHER clients (board watchers).
+					for (const c of clients) {
+						if (c === sock) continue;
+						try { c.write(encode(f)); } catch { /* drop */ }
+					}
+				}
 			}
 		});
 		const drop = () => clients.delete(sock);

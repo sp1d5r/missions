@@ -74,11 +74,14 @@ export function removeSocket(socketPath: string): void {
  *
  * `hello` carries the client's cwd. It is the only way the daemon learns which
  * repo a terminal is sitting in, since a shared org process has no cwd of its own.
+ *
+ * `mission` is a lifecycle event emitted by the registry whenever a mission
+ * transitions to a new status. It is broadcast to all clients so the web board
+ * can update without polling.
  */
-export interface Frame {
-	t: "input" | "out" | "hello";
-	text: string;
-}
+export type Frame =
+	| { t: "input" | "out" | "hello"; text: string }
+	| { t: "mission"; event: "started" | "finished" | "status" | "removed"; id: string; at: number; status?: string };
 
 export function encode(frame: Frame): string {
 	return `${JSON.stringify(frame)}\n`;

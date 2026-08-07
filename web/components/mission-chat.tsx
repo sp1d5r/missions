@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 
 /**
  * Ask the mission's overseer about it, in the mission's own thread.
@@ -45,6 +46,7 @@ export function MissionChat({
 	cleared: boolean;
 	canMutate: boolean;
 }) {
+	const router = useRouter();
 	const [entries, setEntries] = useState<Entry[]>([]);
 	const [draft, setDraft] = useState("");
 	const [asking, setAsking] = useState(false);
@@ -170,14 +172,18 @@ export function MissionChat({
 				else if (action === "clear") {
 					setWasCleared(true);
 					setNote("cleared");
-				} else setNote("merge sent to the chief");
+					router.refresh();
+				} else {
+					setNote("merge sent to the chief");
+					router.refresh();
+				}
 			} catch (err) {
 				setNote(err instanceof Error ? err.message : String(err));
 			} finally {
 				setActing(null);
 			}
 		},
-		[id, name],
+		[id, name, router],
 	);
 
 	return (

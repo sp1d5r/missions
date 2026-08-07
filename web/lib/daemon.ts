@@ -16,6 +16,8 @@ import { existsSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import { drainFrames, encode, orgSocketPath, type Frame } from "@missions/ipc.js";
 
+export type { Frame };
+
 export function socketPath(): string {
 	return orgSocketPath();
 }
@@ -98,4 +100,53 @@ export async function sendInput(text: string): Promise<void> {
  */
 export async function setFocus(repoPath: string): Promise<void> {
 	await send({ t: "hello", text: repoPath });
+}
+
+export type MissionLifecycleFrame = Extract<Frame, { t: "mission" }>;
+
+/**
+ * Attach to the daemon and yield parsed mission lifecycle frames as they arrive.
+ * Read-only: sends no frames at all. Reconnects with exponential backoff when
+ * the socket drops.
+ */
+export async function* subscribeLifecycle(signal: AbortSignal): AsyncGenerator<MissionLifecycleFrame> {
+	const sock = await connect();
+	signal.addEventListener("abort", () => sock.destroy(), { once: true });
+
+	let buffer = "";
+	const pending: MissionLifecycleFrame[] = [];
+	let wake: (() => void) | null = null;
+	let closed = false;
+
+	sock.on("data", (chunk: string) => {
+		buffer += chunk;
+		const { frames, rest } = drainFrames(buffer);
+		buffer = rest;
+		for (const f of frames) {
+			if (f.t === "mission") pending.push(f as MissionLifecycleFrame);
+		}
+		wake?.();
+	});
+	const end = () => {
+		closed = true;
+		wake?.();
+	};
+	sock.on("close", end);
+	sock.on("error", end);
+
+	try {
+		while (!closed && !signal.aborted) {
+			if (pending.length === 0) {
+				await new Promise<void>((r) => {
+					wake = r;
+				});
+				wake = null;
+				continue;
+			}
+			const next = pending.shift();
+			if (next !== undefined) yield next;
+		}
+	} finally {
+		sock.destroy();
+	}
 }
