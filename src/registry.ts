@@ -167,7 +167,12 @@ export function readActive(): ActiveRecord[] {
 	for (const name of readdirSync(dir)) {
 		if (!name.endsWith(".json")) continue;
 		try {
-			out.push(JSON.parse(readFileSync(join(dir, name), "utf-8")) as ActiveRecord);
+			const rec = JSON.parse(readFileSync(join(dir, name), "utf-8")) as ActiveRecord;
+			// A record missing `repo` cannot be a real mission — every writer sets it before the
+			// first save. Skip it here, at the source, rather than trusting every downstream
+			// consumer (board, web console, workspaces) to each re-derive the same guard.
+			if (typeof rec.repo !== "string" || !rec.repo) continue;
+			out.push(rec);
 		} catch {
 			/* skip */
 		}
