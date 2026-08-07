@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 
 /**
  * The chief, live and remembered.
@@ -55,6 +56,7 @@ export function ChiefConsole({
 	/** Absolute path the chief is pointed at, or undefined if nothing has published it. */
 	focus?: string;
 }) {
+	const router = useRouter();
 	const [blocks, setBlocks] = useState<Block[]>([]);
 	const [status, setStatus] = useState<"connecting" | "live" | "down">("connecting");
 	const [draft, setDraft] = useState("");
@@ -163,6 +165,7 @@ export function ChiefConsole({
 				]);
 			} else {
 				setDraft("");
+				router.refresh();
 			}
 		} catch (err) {
 			setBlocks((prev) => [
@@ -176,7 +179,7 @@ export function ChiefConsole({
 		} finally {
 			setSending(false);
 		}
-	}, [draft, sending]);
+	}, [draft, sending, router]);
 
 	const moveFocus = useCallback(
 		async (path: string) => {
