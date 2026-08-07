@@ -26,12 +26,35 @@ export function daemonUp(): boolean {
 	return existsSync(orgSocketPath());
 }
 
-function connect(): Promise<Socket> {
+/**
+ * `signal`, if given, aborts a connect attempt still in flight — not just the
+ * socket once it exists. Without this, a caller that registers its own abort
+ * listener only after `await connect()` resolves can hang past its own
+ * deadline for as long as the connect attempt takes (unbounded when the
+ * daemon is down or slow), which is exactly what let the board stream's
+ * segment timer stop actually segmenting.
+ */
+function connect(signal?: AbortSignal): Promise<Socket> {
 	return new Promise((resolve, reject) => {
+		if (signal?.aborted) {
+			reject(new Error("aborted"));
+			return;
+		}
 		const sock = createConnection(orgSocketPath());
 		sock.setEncoding("utf-8");
-		sock.once("connect", () => resolve(sock));
-		sock.once("error", reject);
+		const onAbort = () => {
+			sock.destroy();
+			reject(new Error("aborted"));
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
+		sock.once("connect", () => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve(sock);
+		});
+		sock.once("error", (err) => {
+			signal?.removeEventListener("abort", onAbort);
+			reject(err);
+		});
 	});
 }
 
@@ -40,7 +63,7 @@ function connect(): Promise<Socket> {
  * all, so attaching from a phone cannot disturb a terminal.
  */
 export async function* attach(signal: AbortSignal): AsyncGenerator<string> {
-	const sock = await connect();
+	const sock = await connect(signal);
 	signal.addEventListener("abort", () => sock.destroy(), { once: true });
 
 	let buffer = "";
@@ -110,7 +133,7 @@ export type MissionLifecycleFrame = Extract<Frame, { t: "mission" }>;
  * the socket drops.
  */
 export async function* subscribeLifecycle(signal: AbortSignal): AsyncGenerator<MissionLifecycleFrame> {
-	const sock = await connect();
+	const sock = await connect(signal);
 	signal.addEventListener("abort", () => sock.destroy(), { once: true });
 
 	let buffer = "";
