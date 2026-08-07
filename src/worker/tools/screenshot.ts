@@ -44,6 +44,31 @@ async function getBrowser(): Promise<Browser> {
 	return browserPromise;
 }
 
+/**
+ * Unref the browser's underlying OS handles so the Node.js process can exit
+ * naturally when there is no other work pending. Called after each context is
+ * closed (i.e. after each screenshot capture). The browser itself stays alive
+ * as a singleton — only the handles are released from the event-loop reference
+ * count. On process exit the registered cleanup handler closes the browser.
+ *
+ * This is needed so that scripts that call tool.run() directly (e.g. validators
+ * and tests) do not have to call process.exit() explicitly after the capture
+ * finishes.
+ */
+function unrefBrowserHandles(): void {
+	const getHandles = (process as NodeJS.Process & { _getActiveHandles?(): unknown[] })._getActiveHandles;
+	if (typeof getHandles !== "function") return;
+	for (const h of getHandles.call(process)) {
+		const handle = h as { constructor: { name: string }; unref?: () => void; stdin?: { unref?: () => void }; stdout?: { unref?: () => void }; stderr?: { unref?: () => void } };
+		if (handle.constructor.name === "ChildProcess" || handle.constructor.name === "Socket") {
+			handle.unref?.();
+			handle.stdin?.unref?.();
+			handle.stdout?.unref?.();
+			handle.stderr?.unref?.();
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Tool factory
 // ---------------------------------------------------------------------------
@@ -53,6 +78,13 @@ export interface ScreenshotToolOptions {
 	defaultWidth?: number;
 	/** Default viewport height in pixels. */
 	defaultHeight?: number;
+	/**
+	 * Optional callback invoked after each screenshot is captured.
+	 * Called with the raw PNG buffer and MIME type; return value is ignored.
+	 * Lets callers collect image data without going through the full agent pipeline
+	 * (e.g. in tests that invoke the tool directly by name).
+	 */
+	attachImage?: (data: Buffer, mimeType: string) => Promise<unknown> | unknown;
 }
 
 /** Shape returned in the tool result content array (Anthropic image part). */
@@ -63,6 +95,23 @@ interface ImageContentPart {
 		media_type: "image/png";
 		data: string;
 	};
+}
+
+/** Parameters accepted by a single screenshot invocation. */
+export interface ScreenshotParams {
+	url: string;
+	width?: number;
+	height?: number;
+	selector?: string;
+	fullPage?: boolean;
+}
+
+/** Result produced by a single screenshot invocation. */
+export interface ScreenshotResult {
+	/** Content parts ready for the agent pipeline (Anthropic-style image part + text). */
+	content: Array<{ type: string; text?: string; source?: { type: string; media_type: string; data: string } }>;
+	/** Metadata about the capture. */
+	details: { url: string; width: number; height: number; selector?: string; fullPage: boolean; bytes: number };
 }
 
 /**
@@ -78,8 +127,13 @@ interface ImageContentPart {
  * The result content array contains one `{ type: "image", source: { type: "base64", … } }` part.
  * The existing extractImageParts() in worker.ts decodes this automatically on tool_execution_end,
  * so the image flows through onProgress → store.attachImage → state.events without any extra wiring.
+ *
+ * The returned tool object also exposes a `run(params)` method for direct invocation by name
+ * (e.g. from tests or external callers that do `getTool('screenshot').run(params)` without
+ * going through the full agent pipeline). If an `attachImage` callback was provided in opts,
+ * it is called with the raw PNG buffer and MIME type after each successful capture.
  */
-export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentTool {
+export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentTool & { run: (params: ScreenshotParams) => Promise<ScreenshotResult> } {
 	const defaultWidth = opts.defaultWidth ?? 1280;
 	const defaultHeight = opts.defaultHeight ?? 800;
 
@@ -103,63 +157,90 @@ export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentToo
 
 		async execute(
 			_toolCallId: string,
-			params: {
-				url: string;
-				width?: number;
-				height?: number;
-				selector?: string;
-				fullPage?: boolean;
-			},
-		) {
-			const { url, selector, fullPage = false } = params;
-			const width = params.width ?? defaultWidth;
-			const height = params.height ?? defaultHeight;
-
-			const b = await getBrowser();
-			const context = await b.newContext({
-				viewport: { width, height },
-			});
-			const page = await context.newPage();
-
-			try {
-				// Use domcontentloaded for speed on data: URLs which have no network requests.
-				await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
-
-				let pngBuffer: Buffer;
-				if (selector) {
-					const element = page.locator(selector).first();
-					pngBuffer = Buffer.from(await element.screenshot({ type: "png" }));
-				} else {
-					pngBuffer = Buffer.from(await page.screenshot({ type: "png", fullPage }));
-				}
-
-				const base64Data = pngBuffer.toString("base64");
-				const imagePart: ImageContentPart = {
-					type: "image",
-					source: {
-						type: "base64",
-						media_type: "image/png",
-						data: base64Data,
-					},
-				};
-
-				return {
-					content: [
-						{ type: "text" as const, text: `Screenshot captured: ${url} (${width}×${height}px, ${pngBuffer.length} bytes)` },
-						imagePart,
-					],
-					details: {
-						url,
-						width,
-						height,
-						selector,
-						fullPage,
-						bytes: pngBuffer.length,
-					},
-				};
-			} finally {
-				await context.close();
-			}
+			params: ScreenshotParams,
+		): Promise<ScreenshotResult> {
+			return captureScreenshot(params, defaultWidth, defaultHeight, opts.attachImage);
 		},
-	} as unknown as AgentTool;
+
+		/**
+		 * Direct invocation by name — same semantics as execute() but without a toolCallId.
+		 * Lets external callers (tests, validators, future missions) do:
+		 *   getTool('screenshot').run({ url: '...' })
+		 * and receive an image content part plus the PNG buffer in the attachImage callback.
+		 */
+		async run(params: ScreenshotParams): Promise<ScreenshotResult> {
+			return captureScreenshot(params, defaultWidth, defaultHeight, opts.attachImage);
+		},
+	} as unknown as AgentTool & { run: (params: ScreenshotParams) => Promise<ScreenshotResult> };
+}
+
+/**
+ * Core screenshot capture logic, shared by execute() and run().
+ * Separated so both entry points use identical paths and the browser
+ * lifecycle management applies in both cases.
+ */
+async function captureScreenshot(
+	params: ScreenshotParams,
+	defaultWidth: number,
+	defaultHeight: number,
+	attachImage?: ScreenshotToolOptions["attachImage"],
+): Promise<ScreenshotResult> {
+	const { url, selector, fullPage = false } = params;
+	const width = params.width ?? defaultWidth;
+	const height = params.height ?? defaultHeight;
+
+	const b = await getBrowser();
+	const context = await b.newContext({
+		viewport: { width, height },
+	});
+	const page = await context.newPage();
+
+	try {
+		// Use domcontentloaded for speed on data: URLs which have no network requests.
+		await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+
+		let pngBuffer: Buffer;
+		if (selector) {
+			const element = page.locator(selector).first();
+			pngBuffer = Buffer.from(await element.screenshot({ type: "png" }));
+		} else {
+			pngBuffer = Buffer.from(await page.screenshot({ type: "png", fullPage }));
+		}
+
+		// Invoke the optional callback so direct callers (tests, validators) get the image
+		// without going through the full agent pipeline.
+		if (attachImage) {
+			await attachImage(pngBuffer, "image/png");
+		}
+
+		const base64Data = pngBuffer.toString("base64");
+		const imagePart: ImageContentPart = {
+			type: "image",
+			source: {
+				type: "base64",
+				media_type: "image/png",
+				data: base64Data,
+			},
+		};
+
+		return {
+			content: [
+				{ type: "text" as const, text: `Screenshot captured: ${url} (${width}×${height}px, ${pngBuffer.length} bytes)` },
+				imagePart,
+			],
+			details: {
+				url,
+				width,
+				height,
+				selector,
+				fullPage,
+				bytes: pngBuffer.length,
+			},
+		};
+	} finally {
+		await context.close();
+		// Unref the browser's OS handles after the context is closed so that scripts
+		// invoking the tool directly (validators, tests) exit naturally when done.
+		unrefBrowserHandles();
+	}
 }
