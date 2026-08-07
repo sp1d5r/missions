@@ -176,6 +176,15 @@ export function buildTools(
 	 * identical from the console. Optional so a test can build the tool set without a session.
 	 */
 	note?: (msg: string) => void,
+	/**
+	 * Feed a line back into the chief's OWN conversation as a fresh turn — same channel
+	 * MissionRunner uses for "[mission-complete]". Needed by any tool that must not block the
+	 * agent loop for its full duration (a resume can run a whole milestone loop): the tool
+	 * returns immediately and this reports the outcome whenever it actually lands, instead of
+	 * `execute` holding the turn open — and with it every queued message — until it's done.
+	 * Optional so a test can build the tool set without a session.
+	 */
+	notifyChief?: (text: string) => void,
 ): AgentTool[] {
 	const runMissionTool = {
 		name: "run_mission",
@@ -361,24 +370,30 @@ export function buildTools(
 			if (!r?.outDir) return { content: [{ type: "text", text: `Mission ${r?.id ?? params.missionId} has no recorded output directory, so there is nothing to resume from.` }] };
 			if (!r.done) return { content: [{ type: "text", text: `Mission ${r.id} is still ${r.status}. Resuming a live mission is refused — wait for it to finish.` }] };
 
+			// Captured as a local: TS narrowing on r.outDir does not survive into the closure below.
+			const outDir = r.outDir;
 			const before = r.costUsd ? `$${r.costUsd.toFixed(2)} spent` : "no spend recorded";
-			try {
-				// No budget passed: uncapped, and recorded. The ceiling is milestones, not dollars.
-				const state = await resumeMission(r.outDir, { maxMilestones: params.maxMilestones });
-				const sc = state.scoreCard;
-				const after = sc ? `${sc.assertionsPassed}/${sc.assertionsTotal} assertions, ${sc.bugs.length} bug(s)` : "no scorecard";
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Resumed ${r.id} (${r.repoName}). Before: ${before}. After: ${after}, verdict ${state.finalVerdict ?? "unknown"}, $${(state.costUsd ?? 0).toFixed(2)} total.`,
-						},
-					],
-				};
-			} catch (err) {
-				// A refusal is a real answer — report it verbatim rather than a hopeful summary.
-				return { content: [{ type: "text", text: `Could not resume ${r.id}: ${err instanceof Error ? err.message : String(err)}` }] };
-			}
+			// Fire-and-forget: a resume can re-run a whole milestone loop, and this tool call
+			// happens INSIDE the chief's own agent turn. Awaiting it here held the turn — and every
+			// message queued behind it — open for as long as the mission ran, which read as the
+			// chief being hung. Same shape as run_mission: return immediately, report the outcome
+			// through notifyChief when it actually lands.
+			void (async () => {
+				try {
+					// No budget passed: uncapped, and recorded. The ceiling is milestones, not dollars.
+					const state = await resumeMission(outDir, { maxMilestones: params.maxMilestones });
+					const sc = state.scoreCard;
+					const after = sc ? `${sc.assertionsPassed}/${sc.assertionsTotal} assertions, ${sc.bugs.length} bug(s)` : "no scorecard";
+					notifyChief?.(
+						`[mission-complete] Resumed ${r.id} (${r.repoName}). Before: ${before}. After: ${after}, verdict ${state.finalVerdict ?? "unknown"}, $${(state.costUsd ?? 0).toFixed(2)} total.` +
+							` Run dir: ${outDir} (mission.log, state.json, report.html).`,
+					);
+				} catch (err) {
+					// A refusal is a real answer — report it verbatim rather than a hopeful summary.
+					notifyChief?.(`[mission-complete] Could not resume ${r.id}: ${err instanceof Error ? err.message : String(err)}`);
+				}
+			})();
+			return { content: [{ type: "text", text: `Resuming ${r.id} (${r.repoName}) in the background — before: ${before}. I'll report when it lands.` }] };
 		},
 	} as unknown as AgentTool;
 
@@ -474,7 +489,7 @@ export function createChiefSession(homeCwd: string): ChiefSession {
 			systemPrompt: SYSTEM_PROMPT,
 			model,
 			thinkingLevel: "medium",
-			tools: buildTools(() => focus, () => runnerRef, chiefNote),
+			tools: buildTools(() => focus, () => runnerRef, chiefNote, send),
 		},
 		streamFn,
 		getApiKey: (provider) => getEnvApiKey(provider),
@@ -550,7 +565,7 @@ export function createChiefSession(homeCwd: string): ChiefSession {
 			registerWorkspace(full);
 			publishFocus(full);
 			// Read tools are bound to a cwd at construction, so they are rebuilt to follow.
-			agent.state.tools = buildTools(() => focus, () => runnerRef, chiefNote);
+			agent.state.tools = buildTools(() => focus, () => runnerRef, chiefNote, send);
 			emit(chalk.dim(`  · focus → ${basename(full)}\n`));
 		},
 		notify(text: string) {

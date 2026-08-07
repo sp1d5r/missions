@@ -287,9 +287,11 @@ function workerTools(missionId: string, outDir: string): AgentTool[] {
 		name: "resume_mission",
 		label: "resume",
 		description:
-			"Resume this stalled, budget-exhausted, or ceiling-hit mission. " +
-			"Call this after you have committed a fix that addresses one or more failing assertions, or after the operator has resolved the stall condition. " +
-			"Returns { refused, reason, remedy, before, after, verdict } where refused=true means a guard blocked the resume (see reason+remedy). " +
+			"Resume this stalled, budget-exhausted, or ceiling-hit mission. Runs in the BACKGROUND — this call " +
+			"returns immediately once the resume is accepted; the actual re-validation can take minutes. The outcome " +
+			"is appended to this chat as a '[resume-complete]' message when it lands, not returned by this call. " +
+			"Returns { refused, reason, remedy, before } on immediate refusal (a guard blocked the resume outright), " +
+			"or { refused: false, before, resuming: true } once it's been kicked off. " +
 			"Do NOT call this while workers are still running.",
 		parameters: Type.Object({
 			budget: Type.Optional(Type.Number({ description: "Hard cap in USD on top of what was already spent. Omit for uncapped — spend is recorded either way. Only set this if you specifically want the run to stop dead at a number." })),
@@ -301,25 +303,31 @@ function workerTools(missionId: string, outDir: string): AgentTool[] {
 			const before = store.state.scoreCard
 				? `${store.state.scoreCard.assertionsPassed}/${store.state.scoreCard.assertionsTotal} assertions, ${store.state.scoreCard.bugs.length} bug(s)`
 				: "no scorecard";
-			try {
-				const result = await resumeMission(outDir, { budget: p.budget, maxMilestones: p.maxMilestones });
-				const sc = result.scoreCard;
-				const after = sc
-					? `${sc.assertionsPassed}/${sc.assertionsTotal} assertions, ${sc.bugs.length} bug(s)`
-					: "no scorecard";
-				return text({ refused: false, before, after, verdict: result.finalVerdict ?? "unknown" });
-			} catch (err) {
-				const msg = err instanceof Error ? err.message : String(err);
-				// Parse structured reason/remedy from the error message if possible.
-				const reasonMatch = /Cannot resume: (\S+)\./.exec(msg);
-				const remedyMatch = /Cannot resume: [^.]+\.\s*(.+)$/.exec(msg);
-				return text({
-					refused: true,
-					reason: reasonMatch?.[1] ?? msg,
-					remedy: remedyMatch?.[1] ?? "see error details",
-					before,
-				});
-			}
+			// Fire-and-forget: a resume can run a whole milestone loop, and this tool call happens
+			// INSIDE the HTTP request an ask() is answering (5-minute cap on Vercel, unbounded but
+			// still a held connection locally). Awaiting it here blocked the console's chat request
+			// for as long as the mission ran — indistinguishable from the overseer being dead. Same
+			// fix as chief.ts's resume_mission: return immediately, and since this session does not
+			// outlive the request, persist the outcome straight to chat.jsonl so the next question
+			// (or a page reload) sees it.
+			void (async () => {
+				try {
+					const result = await resumeMission(outDir, { budget: p.budget, maxMilestones: p.maxMilestones });
+					const sc = result.scoreCard;
+					const after = sc
+						? `${sc.assertionsPassed}/${sc.assertionsTotal} assertions, ${sc.bugs.length} bug(s)`
+						: "no scorecard";
+					appendChatEntry(outDir, {
+						role: "overseer",
+						text: `[resume-complete] Before: ${before}. After: ${after}, verdict ${result.finalVerdict ?? "unknown"}.`,
+						at: new Date().toISOString(),
+					});
+				} catch (err) {
+					const msg = err instanceof Error ? err.message : String(err);
+					appendChatEntry(outDir, { role: "overseer", text: `[resume-complete] Could not resume: ${msg}`, at: new Date().toISOString() });
+				}
+			})();
+			return text({ refused: false, before, resuming: true, note: "Resuming in the background — I'll note the outcome in this chat when it lands." });
 		},
 	} as unknown as AgentTool;
 
