@@ -51,12 +51,14 @@ export interface ActiveRecord {
 /**
  * How long a record may go untouched before we stop calling it alive.
  *
- * A running mission republishes on every log line, so silence is strong evidence. The window is
- * generous because the one legitimately quiet stretch is a setup step — a cold `pdm install` can
- * run twenty minutes and emits progress only when it finishes — and calling a live mission dead
- * is the worse error of the two.
+ * A running mission republishes on every log line, so silence is strong evidence. The window
+ * still covers the one legitimately quiet stretch — a setup step like a cold `pdm install` can
+ * run twenty minutes and emits progress only when it finishes — but a full hour meant a process
+ * that died could sit on the board reading "live" for up to 60 minutes before anyone noticed.
+ * That defeats the point of a heartbeat: it should read as dead not long after it actually is.
+ * 30 minutes is the floor a cold install still needs (see the registry test for that contract).
  */
-export const STALE_AFTER_MS = 60 * 60_000;
+export const STALE_AFTER_MS = 30 * 60_000;
 
 /**
  * Is this mission actually running?
