@@ -14,6 +14,13 @@ export interface StallInput {
 	milestonesRemaining: number;
 	/** True if a re-validate retry was already attempted for this milestone. */
 	retriedThisMilestone: boolean;
+	/**
+	 * "fast" mode: an unrecognised or multi-blocker boundary is scoped as a correction and
+	 * retried rather than failing closed, as long as milestone budget remains. Only true
+	 * exhaustion (milestonesRemaining === 0) still stalls. Absent/"rigorous" keeps the
+	 * fail-closed behaviour below.
+	 */
+	fastMode?: boolean;
 }
 
 export type StallDecision =
@@ -42,7 +49,7 @@ export type StallDecision =
  * never as the sole content.
  */
 export function decideStallOrRetry(input: StallInput): StallDecision {
-	const { violations, correctionsOffered, milestonesRemaining, retriedThisMilestone } = input;
+	const { violations, correctionsOffered, milestonesRemaining, retriedThisMilestone, fastMode } = input;
 
 	const slugs = violations.map((v) => v.invariant);
 
@@ -87,6 +94,23 @@ export function decideStallOrRetry(input: StallInput): StallDecision {
 			reason:
 				"The orchestrator's verdict was not backed by the evidence, but there is no milestone budget remaining to run corrections. " +
 				"A human needs to review the failing assertions and extend the budget if appropriate.",
+			invariants: slugs,
+		};
+	}
+
+	// Rule 3, fast mode: don't fail closed on an unrecognised or multi-blocker combination —
+	// scope it as a correction and let the next milestone take another swing, as long as
+	// budget remains. Only genuine exhaustion still stalls.
+	if (fastMode) {
+		if (milestonesRemaining > 0) {
+			return { action: "scope-corrections" };
+		}
+		const slugList = slugs.join(", ");
+		return {
+			action: "stall",
+			reason:
+				`The milestone was blocked by ${violations.length} invariant violation(s) (${slugList}), and there is no milestone budget left to retry. ` +
+				"A human needs to inspect the boundary violations and decide whether to extend the budget.",
 			invariants: slugs,
 		};
 	}

@@ -37,6 +37,7 @@ Your own hands (read, grep, find, ls, bash, write, edit):
 
 How to behave:
 - Infer intent. Propose a crisp plan in 1-2 lines. When the ask is clear, call run_mission to dispatch a worker — it runs in the BACKGROUND, so say you've kicked it off and keep talking.
+- run_mission takes a "mode". Default to "fast" — most asks (a rebrand, a game, a script, a refactor with no external stakes) don't need the full contract-and-adversarial-QA pipeline, and rigorous mode's fail-closed stalling on the first rough edge is the thing that made this harness feel unusable. Only pass "rigorous" when the change is genuinely high-stakes (schema/DDL, auth, billing, anything touching prod data) and you actually want it to stop and wait for a human rather than push through.
 - Missions run in PARALLEL, each in its own git worktree (a few at once). Dispatch several pieces of work concurrently.
 - run_mission is for WRITING CODE. Never dispatch one for a deterministic local operation — merging, cleaning up,
   listing. Those have their own tools (accept_mission, reclaim_disk, list_missions). A worker cannot run git at all,
@@ -54,7 +55,7 @@ function userMsg(text: string): AgentMessage {
 	return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() } as AgentMessage;
 }
 
-function configFor(targetCwd: string, goal: string, rfc: string, maxFeatures: number): MissionConfig {
+function configFor(targetCwd: string, goal: string, rfc: string, maxFeatures: number, mode?: "fast" | "rigorous"): MissionConfig {
 	const runId = `run-${new Date().toISOString().replace(/[:.]/g, "-")}`;
 	return {
 		goal,
@@ -67,6 +68,7 @@ function configFor(targetCwd: string, goal: string, rfc: string, maxFeatures: nu
 		maxMilestones: 3,
 		target: /nadine|naomi/i.test(targetCwd) ? "nadine" : "generic",
 		useWorktree: true,
+		mode,
 	};
 }
 
@@ -82,6 +84,7 @@ interface Job {
 	goal: string;
 	rfc: string;
 	maxFeatures: number;
+	mode?: "fast" | "rigorous";
 }
 
 /** Parallel background mission runner: each mission runs in its own worktree, in whichever repo it targets. */
@@ -120,7 +123,7 @@ class MissionRunner {
 	}
 
 	private async runOne(job: Job): Promise<void> {
-		const config = configFor(job.repo, job.goal, job.rfc, job.maxFeatures);
+		const config = configFor(job.repo, job.goal, job.rfc, job.maxFeatures, job.mode);
 		const repoName = basename(job.repo);
 		const tag = `${repoName}:${job.goal.length > 20 ? `${job.goal.slice(0, 20)}…` : job.goal}`;
 		this.log(chalk.dim(`\n  ▶ mission started in ${repoName}: ${job.goal}\n`));
@@ -182,13 +185,26 @@ export function buildTools(
 			goal: Type.String({ description: "One-line goal." }),
 			rfc: Type.Optional(Type.String({ description: "Optional detail: what's wrong / what you want." })),
 			maxFeatures: Type.Optional(Type.Number({ description: "Features this run (default 1)." })),
+			mode: Type.Optional(
+				Type.Union([Type.Literal("fast"), Type.Literal("rigorous")], {
+					description:
+						"'fast' (use for exploratory/low-stakes asks — a rebrand, a game, a one-off script): the plan gate never blocks and the boundary only stalls when milestone budget runs out, so the mission keeps making forward progress instead of stopping for you. " +
+						"'rigorous' (default — use when you actually want it gated, e.g. schema changes, anything touching auth/billing/prod): fails closed and stalls on the first unrecognised blocker.",
+				}),
+			),
 			repo: REPO_PARAM,
 		}),
-		async execute(_id: string, params: { goal: string; rfc?: string; maxFeatures?: number; repo?: string }) {
+		async execute(_id: string, params: { goal: string; rfc?: string; maxFeatures?: number; mode?: "fast" | "rigorous"; repo?: string }) {
 			const ws = resolveWorkspace(params.repo, focus());
 			if (!ws) return unknownRepo(params.repo ?? "");
 			registerWorkspace(ws.path);
-			const { startedNow, active } = runner().enqueue({ repo: ws.path, goal: params.goal, rfc: params.rfc ?? "", maxFeatures: params.maxFeatures ?? 1 });
+			const { startedNow, active } = runner().enqueue({
+				repo: ws.path,
+				goal: params.goal,
+				rfc: params.rfc ?? "",
+				maxFeatures: params.maxFeatures ?? 1,
+				mode: params.mode,
+			});
 			const text = startedNow
 				? `Started "${params.goal}" in ${ws.name} (own worktree; ${active} running). I'll report when it's done — keep talking or dispatch more.`
 				: `Queued "${params.goal}" for ${ws.name} — ${active} already running (cap 3); it'll start as a slot frees.`;

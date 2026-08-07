@@ -302,6 +302,16 @@ export interface MissionConfig {
 	/** Optional repo check command run by the scrutiny validator (e.g. "npm test"). */
 	checkCommand?: string;
 	/**
+	 * "rigorous" (default): plan gate blocks on invariant violations, and an unrecognised or
+	 * multi-blocker boundary fails closed to STALLED — right for work you want gated.
+	 *
+	 * "fast": the plan gate never blocks (violations still logged as warnings), and the boundary
+	 * only stalls when milestone budget is actually exhausted — every other blocker gets scoped as
+	 * a correction and retried. Trades the fail-closed safety net for not stopping on every rough
+	 * edge; use it for exploratory/low-stakes work where a human isn't standing by to unstick it.
+	 */
+	mode?: "fast" | "rigorous";
+	/**
 	 * How long a STALLED milestone stays open for an operator to steer its worker, in ms.
 	 *
 	 * A stall is the moment the mission most needs a human, and its workers still hold everything

@@ -245,6 +245,7 @@ async function runMilestoneLoop(ctx: MilestoneLoopContext): Promise<{ verdict: M
 			cwd: workCwd,
 			plan,
 			bugSpotterModel: config.routing.bugSpotter,
+			skipBugSpotter: config.mode === "fast",
 			diff,
 			intent,
 			extraCheckCommand: config.checkCommand ?? ctx.verifyCommand,
@@ -388,6 +389,7 @@ async function runMilestoneLoop(ctx: MilestoneLoopContext): Promise<{ verdict: M
 					correctionsOffered: corrections.length > 0,
 					milestonesRemaining: ctx.maxMilestones - m,
 					retriedThisMilestone: retriedThisMilestone,
+					fastMode: config.mode === "fast",
 				});
 
 				if (decision.action === "re-validate") {
@@ -399,6 +401,7 @@ async function runMilestoneLoop(ctx: MilestoneLoopContext): Promise<{ verdict: M
 						cwd: workCwd,
 						plan,
 						bugSpotterModel: config.routing.bugSpotter,
+						skipBugSpotter: config.mode === "fast",
 						diff: diff2,
 						intent,
 						extraCheckCommand: config.checkCommand ?? verifyCommand,
@@ -682,7 +685,11 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 		for (const w of warnings(planViolations)) emit(`  ⚠ [${w.invariant}] ${w.detail}`);
 		const planBlockers = blocking(planViolations);
 		if (planBlockers.length) {
-			throw new Error(`Plan violates ${planBlockers.length} harness invariant(s):\n${formatViolations(planBlockers)}`);
+			if (config.mode === "fast") {
+				emit(`  ⚠ plan violates ${planBlockers.length} harness invariant(s), proceeding anyway (fast mode):\n${formatViolations(planBlockers)}`);
+			} else {
+				throw new Error(`Plan violates ${planBlockers.length} harness invariant(s):\n${formatViolations(planBlockers)}`);
+			}
 		}
 
 		// Schema work is the one action a parallel worker can take that breaks every other tree
@@ -1013,6 +1020,7 @@ export async function resumeMission(
 			cwd: workCwd,
 			plan,
 			bugSpotterModel: config.routing.bugSpotter,
+			skipBugSpotter: config.mode === "fast",
 			diff,
 			intent,
 			extraCheckCommand: config.checkCommand,

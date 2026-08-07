@@ -24,10 +24,17 @@ export interface RunValidatorsOptions {
 	 * When absent, all assertions are validated normally (existing behaviour).
 	 */
 	dispatchedFeatureIds?: string[];
+	/**
+	 * Fast mode: skip the adversarial bug-spotter pass entirely. Cheaper and faster, but
+	 * "code-review" assertions then pass unconditionally (nothing found no bugs because
+	 * nothing looked), and no bug list backs the milestone boundary review. The explicit
+	 * tradeoff for exploratory work that doesn't need a second reviewer.
+	 */
+	skipBugSpotter?: boolean;
 }
 
 export async function runValidators(options: RunValidatorsOptions): Promise<ScoreCard> {
-	const { cwd, plan, bugSpotterModel, diff, intent, extraCheckCommand, env, foreignRoot, onProgress, dispatchedFeatureIds } = options;
+	const { cwd, plan, bugSpotterModel, diff, intent, extraCheckCommand, env, foreignRoot, onProgress, dispatchedFeatureIds, skipBugSpotter } = options;
 	const checks: CheckResult[] = [];
 	let costUsd = 0;
 
@@ -53,9 +60,15 @@ export async function runValidators(options: RunValidatorsOptions): Promise<Scor
 	};
 
 	// 1. Adversarial bug-spotter over the whole diff (drives code-review assertions too).
-	onProgress?.("bug-spotter reviewing diff");
-	const { bugs, costUsd: bugCost } = await spotBugs(bugSpotterModel, intent, diff);
-	costUsd += bugCost;
+	let bugs: ScoreCard["bugs"] = [];
+	if (skipBugSpotter) {
+		onProgress?.("bug-spotter skipped (fast mode)");
+	} else {
+		onProgress?.("bug-spotter reviewing diff");
+		const spotted = await spotBugs(bugSpotterModel, intent, diff);
+		bugs = spotted.bugs;
+		costUsd += spotted.costUsd;
+	}
 	const blocking = bugs.filter((b) => b.severity === "critical" || b.severity === "high").length;
 
 	// 2. Extra scrutiny command (repo test/typecheck), if provided.

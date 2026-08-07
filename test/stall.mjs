@@ -167,6 +167,54 @@ check("completely unknown blocker slug → fail closed to stall", () => {
 	assert(result.reason !== "some.completely.unknown.invariant", "stall reason must not be a bare slug");
 });
 
+// ---- Rule 3, fast mode: retry instead of failing closed --------------------
+
+check("fast mode: unknown blocker with budget remaining → scope-corrections, not stall", () => {
+	const result = decideStallOrRetry({
+		violations: [v("some.completely.unknown.invariant")],
+		correctionsOffered: true,
+		milestonesRemaining: 2,
+		retriedThisMilestone: false,
+		fastMode: true,
+	});
+	assert(result.action === "scope-corrections", `expected scope-corrections, got ${result.action}`);
+});
+
+check("fast mode: multiple blockers with budget remaining → scope-corrections, not stall", () => {
+	const result = decideStallOrRetry({
+		violations: [v("scorecard.covers-contract"), v("verdict.evidence-backed")],
+		correctionsOffered: true,
+		milestonesRemaining: 1,
+		retriedThisMilestone: false,
+		fastMode: true,
+	});
+	assert(result.action === "scope-corrections", `expected scope-corrections, got ${result.action}`);
+});
+
+check("fast mode: no budget remaining still stalls with non-empty sentence", () => {
+	const result = decideStallOrRetry({
+		violations: [v("some.completely.unknown.invariant")],
+		correctionsOffered: true,
+		milestonesRemaining: 0,
+		retriedThisMilestone: false,
+		fastMode: true,
+	});
+	assert(result.action === "stall", `expected stall, got ${result.action}`);
+	assert(result.reason.length > 0, "stall reason must not be empty");
+	assert(result.reason.includes(" "), "stall reason must be a sentence");
+	assert(result.reason !== "some.completely.unknown.invariant", "stall reason must not be a bare slug");
+});
+
+check("rigorous (fastMode absent) still fails closed on unknown blocker with budget remaining", () => {
+	const result = decideStallOrRetry({
+		violations: [v("some.completely.unknown.invariant")],
+		correctionsOffered: true,
+		milestonesRemaining: 5,
+		retriedThisMilestone: false,
+	});
+	assert(result.action === "stall", `expected stall, got ${result.action}`);
+});
+
 check("no violations → scope-corrections (zero-blocker boundary cleared)", () => {
 	const result = decideStallOrRetry({
 		violations: [],

@@ -39,6 +39,7 @@ interface Flags {
 	branch?: string;
 	check?: string;
 	targetKind?: "generic" | "nadine";
+	mode?: "fast" | "rigorous";
 	open: boolean;
 	help: boolean;
 	/** gc only: also prune shared package-manager caches (machine-wide). */
@@ -96,6 +97,8 @@ function parseArgs(argv: string[]): Flags {
 		else if (a === "--socket") f.socket = next();
 		else if (a === "--nadine") f.targetKind = "nadine";
 		else if (a === "--generic") f.targetKind = "generic";
+		else if (a === "--fast") f.mode = "fast";
+		else if (a === "--rigorous") f.mode = "rigorous";
 		else if (a === "--open") f.open = true;
 		else if (a === "--dry-run") f.dryRun = true;
 		else if (a === "--deep") f.deep = true;
@@ -144,6 +147,9 @@ Flags:
   --max-videos <n>    Transcripts to read per briefing (default: 4)
   --check "<cmd>"     Extra scrutiny command (e.g. "npm test")
   --nadine|--generic  Force target adapter (default: auto-detect)
+  --fast              Loosen the harness: plan-gate violations warn instead of block, and the
+                       boundary only stalls when milestone budget runs out (default: rigorous)
+  --rigorous          Explicit opposite of --fast (this is already the default)
   --out <path>        Where to write state.json/report.html (default: <target>/.missions/runs/<id>)
   --branch <name>     Work branch (default: missions/<date>)
   --open              Open report.html when done
@@ -179,6 +185,7 @@ function buildConfig(f: Flags, goal: string, rfc: string): MissionConfig {
 		maxMilestones: f.maxMilestones,
 		checkCommand: f.check,
 		target: targetKind,
+		mode: f.mode,
 	};
 }
 
