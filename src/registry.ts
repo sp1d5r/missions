@@ -104,19 +104,35 @@ function emitLifecycle(frame: Parameters<typeof encode>[0] & { t: "mission" }): 
 	}
 }
 
-/** Cache of last-seen status per mission id, used to suppress duplicate emissions. */
-const _lastStatus = new Map<string, string>();
-
 export function writeActive(rec: ActiveRecord): void {
 	mkdirSync(ACTIVE_DIR(), { recursive: true });
-	writeFileSync(join(ACTIVE_DIR(), `${rec.id}.json`), JSON.stringify(rec, null, 2));
-	// Emit a lifecycle frame only when the status actually changes.
-	const prev = _lastStatus.get(rec.id);
-	const next = rec.status;
-	if (prev === next) return;
-	_lastStatus.set(rec.id, next);
-	const event = prev === undefined ? "started" : rec.done ? "finished" : "status";
-	emitLifecycle({ t: "mission", event, id: rec.id, at: Date.now(), status: next });
+	const p = join(ACTIVE_DIR(), `${rec.id}.json`);
+	// Read the prior on-disk record before overwriting — this makes the
+	// dedup guard restart-safe: a fresh process re-writing an unchanged
+	// record sees the real previous state rather than treating every first
+	// write as a brand-new mission.
+	let prevStatus: string | undefined;
+	let prevDone: boolean | undefined;
+	try {
+		const prior = JSON.parse(readFileSync(p, "utf-8")) as ActiveRecord;
+		prevStatus = prior.status;
+		prevDone = prior.done;
+	} catch {
+		/* file absent on first write — prevStatus stays undefined */
+	}
+	writeFileSync(p, JSON.stringify(rec, null, 2));
+	// Emit a lifecycle frame only when the status or done flag actually changes.
+	const nextStatus = rec.status;
+	const nextDone = rec.done;
+	if (prevStatus === nextStatus) {
+		// Status unchanged — but if done just flipped false→true emit 'finished'.
+		if (prevDone === false && nextDone === true) {
+			emitLifecycle({ t: "mission", event: "finished", id: rec.id, at: Date.now(), status: nextStatus });
+		}
+		return;
+	}
+	const event = prevStatus === undefined ? "started" : nextDone ? "finished" : "status";
+	emitLifecycle({ t: "mission", event, id: rec.id, at: Date.now(), status: nextStatus });
 }
 
 /** Patch a record in place (e.g. mark it cleared/merged from the board). No-op if it's gone. */
@@ -139,7 +155,6 @@ export function removeActive(id: string): void {
 	} catch {
 		/* skip */
 	}
-	_lastStatus.delete(id);
 	emitLifecycle({ t: "mission", event: "removed", id, at: Date.now() });
 }
 
