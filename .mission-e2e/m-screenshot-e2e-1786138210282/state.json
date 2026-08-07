@@ -1,0 +1,119 @@
+{
+  "id": "m-screenshot-e2e-1786138210282",
+  "startedAt": "2026-08-07T21:30:10.282Z",
+  "goal": "Take a screenshot of a data URL",
+  "rfc": "e2e screenshot test",
+  "status": "succeeded",
+  "branch": "missions/m-screenshot-e2e-1786138210282",
+  "targetCwd": "/Users/elijahahmad/missions/.missions/worktrees/m-2026-08-07T20-29-52-165Z",
+  "origin": {
+    "kind": "human"
+  },
+  "routing": {
+    "worker": {
+      "provider": "anthropic",
+      "modelId": "claude-opus-4-5"
+    },
+    "orchestrator": {
+      "provider": "anthropic",
+      "modelId": "claude-opus-4-5"
+    },
+    "bugSpotter": {
+      "provider": "anthropic",
+      "modelId": "claude-opus-4-5"
+    }
+  },
+  "features": [
+    {
+      "id": "f1",
+      "title": "Screenshot data URL",
+      "description": "Take a screenshot using the screenshot tool",
+      "assertionIds": [
+        "a1"
+      ],
+      "milestone": 1,
+      "origin": "plan"
+    }
+  ],
+  "handoffs": [
+    {
+      "featureId": "f1",
+      "milestone": 1,
+      "completed": "Screenshot captured via createScreenshotTool",
+      "leftUndone": [],
+      "commands": [],
+      "issues": [],
+      "proceduresFollowed": true,
+      "assertionsClaimed": [
+        "a1"
+      ],
+      "confidence": "high",
+      "costUsd": 0,
+      "degraded": false,
+      "stopReason": "stop",
+      "aborted": false
+    }
+  ],
+  "milestones": [
+    {
+      "index": 1,
+      "featureIds": [
+        "f1"
+      ],
+      "handoffs": [],
+      "scoreCard": {
+        "assertionsPassed": 1,
+        "assertionsTotal": 1,
+        "bugs": [],
+        "costUsd": 0,
+        "dispatchedFeatureIds": [
+          "f1"
+        ]
+      },
+      "verdict": "passed",
+      "correctionIds": []
+    }
+  ],
+  "commits": [],
+  "costUsd": 0,
+  "log": [],
+  "events": [
+    {
+      "at": "2026-08-07T21:30:10.577Z",
+      "kind": "image",
+      "label": "image from screenshot",
+      "seat": "eng",
+      "image": {
+        "path": "images/386f6984b1946bc25df3d4ae19425e2a62a74f2b608121f6ac9cd31c020135f2.png",
+        "mimeType": "image/png",
+        "bytes": 15854
+      }
+    }
+  ],
+  "finalVerdict": "passed",
+  "outcome": "clean",
+  "plan": {
+    "summary": "Capture a screenshot using the reusable screenshot tool",
+    "features": [
+      {
+        "id": "f1",
+        "title": "Screenshot data URL",
+        "description": "Use screenshot tool",
+        "assertionIds": [
+          "a1"
+        ]
+      }
+    ],
+    "contract": {
+      "assertions": [
+        {
+          "id": "a1",
+          "statement": "Mission has at least one image attachment",
+          "strength": "existence",
+          "passed": true,
+          "evidence": "image event recorded in state.events"
+        }
+      ]
+    }
+  }
+}
