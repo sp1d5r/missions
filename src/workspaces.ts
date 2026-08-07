@@ -74,6 +74,8 @@ export function listWorkspaces(): Workspace[] {
 	const byPath = new Map<string, Workspace>();
 	for (const w of reg.workspaces) byPath.set(w.path, w);
 	for (const rec of readActive()) {
+		// Malformed/stray records (e.g. hand-written test fixtures) shouldn't 500 the whole board.
+		if (typeof rec.repo !== "string" || !rec.repo) continue;
 		if (byPath.has(rec.repo) || dropped.has(rec.repo)) continue;
 		byPath.set(rec.repo, { path: rec.repo, name: rec.repoName || basename(rec.repo), addedAt: rec.startedAt, lastSeenAt: rec.updatedAt });
 	}
