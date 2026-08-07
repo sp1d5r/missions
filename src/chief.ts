@@ -1,9 +1,10 @@
-import { createBashTool, createEditTool, createReadOnlyTools, createWriteTool } from "@earendil-works/pi-coding-agent";
+import { createEditTool, createReadOnlyTools, createWriteTool } from "@earendil-works/pi-coding-agent";
 import { Agent, getEnvApiKey, getModel, streamFn, type AgentEvent, type AgentMessage, type AgentTool } from "./pi.js";
 import { basename, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Type } from "typebox";
 import chalk from "chalk";
+import { createBoundedBashTool } from "./bounded-bash.js";
 import { cmuxOpenBrowser, cmuxOpenDiff, hasCmuxPassword, insideCmux } from "./cmux.js";
 import { publishFocus } from "./focus.js";
 import { mergeBranch } from "./git.js";
@@ -420,7 +421,7 @@ export function buildTools(
 	const cwd = focus();
 	return [
 		...createReadOnlyTools(cwd),
-		createBashTool(cwd),
+		createBoundedBashTool(cwd),
 		createWriteTool(cwd),
 		createEditTool(cwd),
 		runMissionTool,

@@ -10,7 +10,8 @@
  */
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
-import { createBashTool, createReadOnlyTools } from "@earendil-works/pi-coding-agent";
+import { createReadOnlyTools } from "@earendil-works/pi-coding-agent";
+import { createBoundedBashTool } from "./bounded-bash.js";
 import { join } from "node:path";
 import { basename } from "node:path";
 import chalk from "chalk";
@@ -373,7 +374,7 @@ export function createOverseerSession(outDir: string, options: OverseerOptions =
 	function repoTools(worktreePath: string | undefined, targetCwd: string) {
 		const cwd = worktreePath && existsSync(worktreePath) ? worktreePath : targetCwd;
 		if (!cwd || !existsSync(cwd)) return [];
-		return [...createReadOnlyTools(cwd), createBashTool(cwd)];
+		return [...createReadOnlyTools(cwd), createBoundedBashTool(cwd)];
 	}
 
 	const agent = new Agent({
