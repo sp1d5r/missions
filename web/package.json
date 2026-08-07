@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start --port 3200",
     "typecheck": "tsc --noEmit",
-    "tunnel": "ngrok http 3200 --domain incomparably-tritheistic-tonya.ngrok-free.dev"
+    "tunnel": "ngrok http 3200 --domain missionstuff.ngrok-free.app"
   },
   "dependencies": {
     "@clerk/nextjs": "^7.6.2",

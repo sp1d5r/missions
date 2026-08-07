@@ -11,6 +11,11 @@ import type { NextConfig } from "next";
  */
 const nextConfig: NextConfig = {
 	turbopack: { root: join(process.cwd(), "..") },
+	// Next 16 rejects cross-origin dev requests — including the HMR websocket — from any
+	// origin not listed here. Reached over ngrok (README "Reach it from your phone"), an
+	// unlisted origin renders as a silently blank page: the websocket 503s, hydration never
+	// finishes, and nothing in the browser console says why.
+	allowedDevOrigins: ["missionstuff.ngrok-free.app", "incomparably-tritheistic-tonya.ngrok-free.dev"],
 	// The org modules touch node:net, node:fs and the daemon socket. They run as
 	// plain Node on the server and must never be bundled for the browser.
 	//
