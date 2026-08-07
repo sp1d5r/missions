@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { type AgentSpec, createDelegateTool } from "./subagent.js";
 import { Agent, getEnvApiKey, getModel, streamFn, type AgentEvent, type AgentMessage, type AssistantMessage } from "./pi.js";
+import { createScreenshotTool } from "./worker/tools/screenshot.js";
 import { parseJson } from "./llm.js";
 import { registerWorker } from "./workers.js";
 import type { Assertion, CommandRecord, Feature, Handoff, HandoffIssue, ModelSpec } from "./types.js";
@@ -121,6 +122,8 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult
 			// every bash command the worker runs gets the mission's env, not the daemon's.
 			tools: [
 				...createCodingTools(cwd, env ? { bash: { spawnHook: (ctx) => ({ ...ctx, env }) } } : undefined),
+				// Headless-browser screenshot — reusable by any future mission.
+				createScreenshotTool(),
 				// Read-only fan-out. Scout spend is charged straight to this worker's total,
 				// so delegating is a budget decision the same as any other tool call.
 				...(scouts?.length

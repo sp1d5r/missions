@@ -2,7 +2,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { contractMapSvg, mermaidSource, missionFlowSvg } from "./diagram.js";
 import { codename, esc, page, statStrip, tag, type Tone } from "./theme.js";
-import type { BugFinding, CommitRecord, Handoff, MilestoneRecord, MilestoneVerdict, MissionState, Plan, ScoreCard, StrengthBreakdown } from "./types.js";
+import type { BugFinding, CommitRecord, Handoff, MilestoneRecord, MilestoneVerdict, MissionEvent, MissionState, Plan, ScoreCard, StrengthBreakdown } from "./types.js";
 import { annotateVerdict } from "./validators/checks.js";
 
 const SEV_TONE: Record<string, Tone> = {
@@ -120,6 +120,32 @@ function milestonesSection(milestones: MilestoneRecord[]): string {
 		.join("");
 }
 
+/**
+ * Renders screenshot/image attachments captured during the mission.
+ *
+ * Each image is shown as an <img> tag referencing the relative path under outDir.
+ * The path stored in the event is relative to outDir (e.g. "images/<sha>.png"),
+ * so it can be used directly as an HTML src for a self-contained report.
+ * When the web UI serves the file it uses /api/m/[id]/images/[file].
+ */
+function imagesSection(events: MissionEvent[]): string {
+	const imageEvents = events.filter((e) => e.kind === "image" && e.image);
+	if (!imageEvents.length) return "";
+	const items = imageEvents
+		.map((e) => {
+			const img = e.image!;
+			const label = esc(e.label);
+			const altText = img.alt ? esc(img.alt) : label;
+			const kb = (img.bytes / 1024).toFixed(1);
+			return `<div style="margin:12px 0">
+				<div class="faint mono" style="margin-bottom:4px">${label} · ${esc(img.mimeType)} · ${kb} KB</div>
+				<img src="${esc(img.path)}" alt="${altText}" style="max-width:100%;border:1px solid #333;border-radius:4px;display:block">
+			</div>`;
+		})
+		.join("\n");
+	return `<h2>Captured screenshots</h2>\n${items}`;
+}
+
 /** Renders the per-strength assertion breakdown panel. */
 function strengthBreakdownPanel(bd: StrengthBreakdown): string {
 	const rows = ([
@@ -213,6 +239,8 @@ export function generateReport(args: {
 
   <h2>What changed</h2>
   ${commitsList(state.commits)}
+
+  ${imagesSection(state.events ?? [])}
 
   <details style="margin-top:26px">
     <summary class="label" style="cursor:pointer">mermaid source</summary>
