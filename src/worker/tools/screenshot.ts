@@ -9,7 +9,7 @@
  * src/worker.ts alongside createCodingTools() and createDelegateTool().
  */
 
-import { type Browser, type BrowserServer } from "playwright";
+import { type Browser } from "playwright";
 import { Type, type AgentTool } from "../../pi.js";
 
 // ---------------------------------------------------------------------------
@@ -17,12 +17,33 @@ import { Type, type AgentTool } from "../../pi.js";
 // ---------------------------------------------------------------------------
 
 let browser: Browser | undefined;
-let browserServer: BrowserServer | undefined;
 let browserPromise: Promise<Browser> | undefined;
 
 /**
- * Close the browser and BrowserServer, resetting the singleton state so the
- * next call to getBrowser() will start a fresh instance.
+ * Handles (Sockets, Servers, etc.) added to the Node.js event loop by the
+ * browser launch. We track them so we can unref them after each capture
+ * (allowing the process to exit naturally when the caller is done) and ref
+ * them again before the next capture (ensuring I/O completes correctly).
+ */
+let browserHandles: Array<{ ref?: () => void; unref?: () => void }> = [];
+
+/** Ref all browser handles so the event loop stays alive during I/O. */
+function refBrowserHandles(): void {
+	for (const h of browserHandles) {
+		try { h.ref?.(); } catch { /* ignore */ }
+	}
+}
+
+/** Unref all browser handles so they do not keep the process alive when idle. */
+function unrefBrowserHandles(): void {
+	for (const h of browserHandles) {
+		try { h.unref?.(); } catch { /* ignore */ }
+	}
+}
+
+/**
+ * Close the browser, resetting the singleton state so the next call to
+ * getBrowser() will start a fresh instance.
  *
  * Exported so callers (tests, validators, end-to-end scripts) can explicitly
  * release browser resources after their last capture, allowing the Node.js
@@ -30,32 +51,29 @@ let browserPromise: Promise<Browser> | undefined;
  */
 export async function closeBrowser(): Promise<void> {
 	const b = browser;
-	const s = browserServer;
 	browser = undefined;
-	browserServer = undefined;
 	browserPromise = undefined;
+	browserHandles = [];
 	try {
 		await b?.close();
-	} catch {
-		// ignore
-	}
-	try {
-		await s?.close();
 	} catch {
 		// ignore
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Module-level SIGINT/SIGTERM handler — registered exactly once.
+// Module-level SIGINT/SIGTERM handler — registered exactly once at import.
 //
 // Calls closeBrowser() if a browser is active, then re-raises the signal so
 // the process exits with the correct signal-based exit code. Using
 // process.once() here (at module load time) ensures we never accumulate more
 // than one listener per signal regardless of how many times getBrowser() is
 // called or how many tool instances are created.
+//
+// Signal handlers do NOT keep the event loop alive, so registering them at
+// module load does not block process exit.
 // ---------------------------------------------------------------------------
-const handleShutdownSignal = async (signal: string) => {
+const handleShutdownSignal = async (signal: string): Promise<void> => {
 	await closeBrowser();
 	process.kill(process.pid, signal);
 };
@@ -66,40 +84,52 @@ process.once("SIGTERM", () => void handleShutdownSignal("SIGTERM"));
 /**
  * Return the shared browser instance, launching it once on first call.
  *
- * We use chromium.launchServer() rather than chromium.launch() so that we
- * retain a reference to the BrowserServer, which exposes .process() — the
- * only correct way to obtain the chromium ChildProcess without walking the
- * global active-handles list.
+ * Uses chromium.launch() directly (rather than launchServer + connect) so
+ * there are no WebSocket server/client handles to track — only the CDP pipes
+ * and the browser child process.
  *
- * The BrowserServer child process is unref()ed immediately after launch so
- * that it does not keep the Node.js event loop alive between captures. During
- * an active capture the context / page handles are reffed by Node internally,
- * so the loop stays alive while work is in flight. After the capture context
- * is closed the loop can drain naturally.
+ * After launch, all new event-loop handles created by the browser are
+ * immediately unref()ed so that the Node.js process can exit naturally after
+ * the last capture completes. Inside captureScreenshot(), the handles are
+ * temporarily ref()ed for the duration of the I/O and then unref()ed again.
+ *
+ * On rejection, browserPromise is cleared so a retry will re-launch.
  */
 async function getBrowser(): Promise<Browser> {
 	if (browser) return browser;
 	if (browserPromise) return browserPromise;
 
-	browserPromise = (async () => {
+	const launch = async (): Promise<Browser> => {
 		// Dynamic import so the module loads even when playwright is not installed.
 		const { chromium } = await import("playwright");
-		const server = await chromium.launchServer({ headless: true });
-		browserServer = server;
 
-		// Unref the child process so it does not keep the Node.js event loop
-		// alive. The process will still be cleaned up correctly on closeBrowser()
-		// or when the SIGINT/SIGTERM handler fires.
-		try {
-			server.process().unref();
-		} catch {
-			// Older Playwright versions may not expose .process() — ignore.
-		}
+		// Snapshot handles before launch so we can identify the new ones.
+		const handlesBefore: unknown[] = (process as NodeJS.Process & { _getActiveHandles?: () => unknown[] })
+			._getActiveHandles?.() ?? [];
 
-		const b = await chromium.connect(server.wsEndpoint());
+		const b = await chromium.launch({ headless: true });
 		browser = b;
+
+		// Track handles added by the browser launch and immediately unref them.
+		// The handles remain functional — they will be re-ref()ed during captures.
+		const handlesAfter: Array<{ ref?: () => void; unref?: () => void }> =
+			((process as NodeJS.Process & { _getActiveHandles?: () => unknown[] })
+				._getActiveHandles?.() ?? []) as Array<{ ref?: () => void; unref?: () => void }>;
+
+		browserHandles = handlesAfter.filter(
+			(h) => !(handlesBefore as unknown[]).includes(h),
+		);
+		unrefBrowserHandles();
+
 		return b;
-	})();
+	};
+
+	browserPromise = launch();
+
+	// Clear the promise reference on failure so a retry can re-launch.
+	browserPromise.catch(() => {
+		browserPromise = undefined;
+	});
 
 	return browserPromise;
 }
@@ -196,7 +226,8 @@ export interface ScreenshotExecuteContext {
  * execute() supports two calling conventions:
  *   1. Agent pipeline:  execute(toolCallId: string, params: ScreenshotParams)
  *   2. Direct call:     execute(params: ScreenshotParams, ctx?: ScreenshotExecuteContext)
- * The distinction is made by checking whether the first argument is a string.
+ * The distinction is made by checking whether the first argument is a string AND the second
+ * argument is an object with a url field (agent pipeline) vs the first arg being a params object.
  */
 export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentTool & {
 	run: (params: ScreenshotParams, ctx?: ScreenshotExecuteContext) => Promise<ScreenshotResult>;
@@ -227,6 +258,12 @@ export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentToo
 		 * Supports two calling conventions:
 		 *   Agent pipeline:  execute(toolCallId: string, params: ScreenshotParams)
 		 *   Direct call:     execute(params: ScreenshotParams, ctx?: ScreenshotExecuteContext)
+		 *
+		 * When the first argument is a string, it is treated as a toolCallId and the
+		 * second argument must be an object with at least a `url` field (ScreenshotParams).
+		 * If the second argument is not a valid params object, a clear error is thrown to
+		 * prevent silent misrouting (e.g. if someone accidentally passes a URL string as
+		 * the first argument).
 		 */
 		async execute(
 			toolCallIdOrParams: string | ScreenshotParams,
@@ -236,7 +273,19 @@ export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentToo
 			let ctxAttachImage: ((mimeType: string, data: Buffer) => Promise<unknown> | unknown) | undefined;
 
 			if (typeof toolCallIdOrParams === "string") {
-				// Normal agent pipeline call: execute(toolCallId, params)
+				// Agent pipeline call: execute(toolCallId, params)
+				// Validate that the second argument is a valid ScreenshotParams object.
+				if (
+					typeof paramsOrCtx !== "object" ||
+					paramsOrCtx === null ||
+					typeof (paramsOrCtx as ScreenshotParams).url !== "string"
+				) {
+					throw new TypeError(
+						`screenshot tool execute(): when the first argument is a string (toolCallId="${toolCallIdOrParams}"), ` +
+						`the second argument must be a ScreenshotParams object with a "url" field. ` +
+						`Got: ${JSON.stringify(paramsOrCtx)}`,
+					);
+				}
 				params = paramsOrCtx as ScreenshotParams;
 			} else {
 				// Direct call: execute(params, ctx?)
@@ -273,17 +322,21 @@ export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentToo
 
 /**
  * Core screenshot capture logic, shared by execute() and run().
- * Separated so both entry points use identical paths and the browser
- * lifecycle management applies in both cases.
  *
- * The browser singleton is NOT closed after each capture — it is reused across
- * subsequent calls for efficiency. The BrowserServer child process is unref()ed
- * at launch time so it does not keep the Node.js event loop alive between
- * captures. Callers that need the process to exit cleanly after their last
- * capture should either:
- *   a) call tool.close() / closeBrowser() explicitly, or
- *   b) use process.exit() (as the worker loop does), or
- *   c) rely on the SIGINT/SIGTERM handler registered at module load time.
+ * Event-loop lifecycle:
+ *   Before any I/O: ref all browser handles so the event loop stays alive.
+ *   After context.close() in finally: unref all browser handles so the process
+ *   can exit naturally when the caller has no more work to do.
+ *
+ * This means: if the caller does NOT call closeBrowser() after their last
+ * capture, the process will still exit cleanly (the unref-ed handles do not
+ * prevent exit). If the caller DOES call closeBrowser(), the browser is
+ * terminated and all handles are released immediately.
+ *
+ * For sequential captures (multiple awaited tool.run() calls), the handles are
+ * ref()ed at the start of each capture and unref()ed after. Because the next
+ * capture's ref() call happens synchronously in the microtask continuation
+ * (before any macrotask can run), the event loop never drains between captures.
  *
  * attachImage deduplication: if ctx provides an attachImage callback, only that
  * one is called. The opts-level callback is only called when no ctx callback is
@@ -304,8 +357,10 @@ async function captureScreenshot(
 
 	const b = await getBrowser();
 
-	// Move newContext inside the try block so context.close() runs in finally
-	// even if newPage() throws.
+	// Ref browser handles AFTER getBrowser() returns so they are populated and
+	// the I/O for this capture keeps the event loop alive.
+	refBrowserHandles();
+
 	let context: Awaited<ReturnType<Browser["newContext"]>> | undefined;
 	try {
 		context = await b.newContext({
@@ -313,10 +368,6 @@ async function captureScreenshot(
 		});
 		const page = await context.newPage();
 
-		// Use 'load' to ensure all synchronous scripts have run and the initial
-		// render is complete. This is important for pages that set background
-		// colours or text via inline styles/scripts — domcontentloaded fires too
-		// early and can capture a blank or partially-rendered page.
 		await page.goto(url, { waitUntil: "load", timeout: 30_000 });
 
 		let pngBuffer: Buffer;
@@ -367,7 +418,9 @@ async function captureScreenshot(
 		} catch {
 			// ignore
 		}
-		// The browser is intentionally NOT closed here. The singleton is reused
-		// across captures. See closeBrowser() and tool.close() for explicit teardown.
+		// Unref browser handles after the capture so they do not prevent the
+		// Node.js process from exiting when the caller has no more work to do.
+		// The next call to captureScreenshot() will ref them again before I/O.
+		unrefBrowserHandles();
 	}
 }
