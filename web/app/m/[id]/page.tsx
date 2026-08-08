@@ -3,6 +3,7 @@ import { AutoRefresh } from "@/components/auto-refresh";
 import { Denied, Ident, Tag, toneFor, type Tone } from "@/components/chrome";
 import { MissionChat } from "@/components/mission-chat";
 import { MissionDiagrams } from "@/components/mission-diagrams";
+import { MissionLive } from "@/components/mission-live";
 import { MissionThread } from "@/components/mission-thread";
 import { Shell, ThreadHead } from "@/components/shell";
 import { mission, record } from "@/lib/data";
@@ -129,6 +130,10 @@ export default async function Mission({ params }: { params: Promise<{ id: string
 						))}
 					</div>
 				)}
+
+						{/* ── live activity indicator + recent-activity feed ──────────── */}
+				{/* Rendered for every mission kind — screenshot, video, coding, etc. */}
+				<MissionLive id={id} initialDone={rec.done} />
 
 				{/* ── the thread proper ─────────────────────────────────────────── */}
 				{/* A client component: replies expand in place, which is the whole point of them. */}

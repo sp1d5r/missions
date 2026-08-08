@@ -545,3 +545,74 @@ textarea { resize: vertical; min-height: 76px; }
 /* The active repo is not disabled (see the component) — it just should not look clickable. */
 .focus-pick[aria-pressed="true"] { background: var(--panel-raised); cursor: default; }
 .focus-pick[aria-pressed="true"]:hover { background: var(--panel-raised); }
+
+/* ── Live activity indicator + recent-activity feed ────────────────────────
+   Rendered on every mission detail page regardless of mission kind.
+   Three stable data-activity values: live | stalled | done.
+   Tests and reviewers can grep for [data-activity="live"] etc. */
+
+.mission-live {
+  border-top: 1px solid var(--hairline);
+  padding: 12px 0 4px;
+  margin-bottom: 10px;
+}
+
+/* Indicator row: dot/mark + short label, inline. */
+.activity-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+}
+
+/* Live state — pulsing dot in the --live (blue) colour. */
+.activity-live { color: var(--live); }
+.activity-dot-live {
+  display: inline-block;
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--live);
+  animation: activity-pulse 1.4s ease-in-out infinite;
+}
+@keyframes activity-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: .25; }
+}
+@media (prefers-reduced-motion: reduce) { .activity-dot-live { animation: none; } }
+
+/* Stalled state — static muted dot in dim colour. */
+.activity-stalled { color: var(--text-dim); }
+.activity-dot-stalled {
+  display: inline-block;
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--text-dim);
+}
+
+/* Done state — checkmark (or cross via the component) in the done colour. */
+.activity-done { color: var(--done); }
+.activity-mark {
+  font-size: 11px;
+  line-height: 1;
+}
+
+.activity-label { font-variant-numeric: tabular-nums; }
+
+/* Feed section. */
+.activity-feed {
+  margin-top: 4px;
+}
+
+/* Individual log lines re-use the .msg grid but stay dim so they do not
+   compete with the structured event thread below. */
+.activity-log-line { opacity: .8; }
+.activity-log-body {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-width: 0;
+}
