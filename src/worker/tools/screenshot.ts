@@ -1,10 +1,9 @@
 /**
  * Headless-browser screenshot tool.
  *
- * Launches Playwright chromium (lazily — the browser is started on first call and kept
- * alive across calls, then closed at process exit), captures a PNG of the given URL,
- * and returns it as an Anthropic-style image content part so the existing extractImageParts
- * path in worker.ts picks it up automatically.
+ * Launches Playwright chromium (lazily on first call), captures a PNG of the
+ * given URL, and returns it as an Anthropic-style image content part so the
+ * existing extractImageParts path in worker.ts picks it up automatically.
  *
  * Registration: add createScreenshotTool() to the tools array in runWorker() in
  * src/worker.ts alongside createCodingTools() and createDelegateTool().
@@ -28,9 +27,6 @@ let browserPromise: Promise<Browser> | undefined;
  * retain a reference to the BrowserServer, which exposes .process() — the
  * only correct way to obtain the chromium ChildProcess without walking the
  * global active-handles list.
- *
- * The process-exit handler ensures both the Browser connection and the
- * BrowserServer are closed cleanly.
  */
 async function getBrowser(): Promise<Browser> {
 	if (browser) return browser;
@@ -43,14 +39,28 @@ async function getBrowser(): Promise<Browser> {
 		browserServer = server;
 		const b = await chromium.connect(server.wsEndpoint());
 		browser = b;
-		// Clean up on any exit so the browser process does not become a zombie.
-		const cleanup = () => {
-			b.close().catch(() => {});
-			server.close().catch(() => {});
+
+		// On SIGINT/SIGTERM: await clean close before exiting so the chromium
+		// subprocess is not left as a zombie.
+		const handleSignal = async (signal: string) => {
+			try {
+				await b.close();
+			} catch {
+				// ignore
+			}
+			try {
+				await server.close();
+			} catch {
+				// ignore
+			}
+			browser = undefined;
+			browserServer = undefined;
+			browserPromise = undefined;
+			process.kill(process.pid, signal);
 		};
-		process.once("exit", cleanup);
-		process.once("SIGINT", cleanup);
-		process.once("SIGTERM", cleanup);
+		process.once("SIGINT", () => void handleSignal("SIGINT"));
+		process.once("SIGTERM", () => void handleSignal("SIGTERM"));
+
 		return b;
 	})();
 
@@ -58,29 +68,28 @@ async function getBrowser(): Promise<Browser> {
 }
 
 /**
- * Unref the browser's own subprocess so the Node.js process can exit naturally
- * when there is no other work pending.
+ * Close the browser and BrowserServer, resetting the singleton state so the
+ * next call to getBrowser() will start a fresh instance.
  *
- * We call BrowserServer.process() — the Playwright-sanctioned API for obtaining
- * the chromium ChildProcess — and unref only that process and its stdio streams.
- * No other event-loop handles are touched (no stdin, no TTY sockets, no
- * unrelated child processes).
- *
- * This is needed so that scripts that call tool.run() directly (e.g. validators
- * and tests) do not have to call process.exit() explicitly after the capture
- * finishes.
+ * Closing all handles allows the Node.js event loop to drain naturally after
+ * direct tool invocations (tests, validators) without requiring process.exit().
  */
-function unrefBrowserHandles(): void {
-	if (!browserServer) return;
-	const child = browserServer.process();
-	if (!child) return;
-	child.unref();
-	// The stdio streams on ChildProcess are typed as Writable/Readable but are
-	// actually Socket instances at runtime; cast to access unref().
-	type Unrefable = { unref?: () => void };
-	(child.stdin as Unrefable | null)?.unref?.();
-	(child.stdout as Unrefable | null)?.unref?.();
-	(child.stderr as Unrefable | null)?.unref?.();
+async function closeBrowser(): Promise<void> {
+	const b = browser;
+	const s = browserServer;
+	browser = undefined;
+	browserServer = undefined;
+	browserPromise = undefined;
+	try {
+		await b?.close();
+	} catch {
+		// ignore
+	}
+	try {
+		await s?.close();
+	} catch {
+		// ignore
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -94,7 +103,7 @@ export interface ScreenshotToolOptions {
 	defaultHeight?: number;
 	/**
 	 * Optional callback invoked after each screenshot is captured.
-	 * Called with the raw PNG buffer and MIME type; return value is ignored.
+	 * Called with the raw PNG buffer and MIME type (buffer first).
 	 * Lets callers collect image data without going through the full agent pipeline
 	 * (e.g. in tests that invoke the tool directly by name).
 	 */
@@ -129,6 +138,26 @@ export interface ScreenshotResult {
 }
 
 /**
+ * Context object passed as the second argument when execute() is called
+ * directly (i.e. not from the agent pipeline). Mirrors the worker store API
+ * so validators and tests can inject their own attachImage handlers.
+ */
+export interface ScreenshotExecuteContext {
+	/**
+	 * Called after each screenshot with (mimeType, buffer).
+	 * Note: when using the factory opts `attachImage`, the order is (buffer, mimeType).
+	 * The context-based signature matches the worker store interface: (mimeType, buffer).
+	 */
+	attachImage?: (mimeType: string, data: Buffer) => Promise<unknown> | unknown;
+	store?: {
+		attachImage?: (mimeType: string, data: Buffer) => Promise<unknown> | unknown;
+	};
+	/** Ignored – present only for compatibility with the worker context shape. */
+	missionId?: string;
+	appendEvent?: (...args: unknown[]) => unknown;
+}
+
+/**
  * Create a reusable screenshot tool that can be registered in the worker tool surface.
  *
  * The tool accepts:
@@ -142,12 +171,19 @@ export interface ScreenshotResult {
  * The existing extractImageParts() in worker.ts decodes this automatically on tool_execution_end,
  * so the image flows through onProgress → store.attachImage → state.events without any extra wiring.
  *
- * The returned tool object also exposes a `run(params)` method for direct invocation by name
+ * The returned tool object also exposes a `run(params, ctx?)` method for direct invocation by name
  * (e.g. from tests or external callers that do `getTool('screenshot').run(params)` without
  * going through the full agent pipeline). If an `attachImage` callback was provided in opts,
- * it is called with the raw PNG buffer and MIME type after each successful capture.
+ * it is called with (buffer, mimeType) after each successful capture.
+ *
+ * execute() supports two calling conventions:
+ *   1. Agent pipeline:  execute(toolCallId: string, params: ScreenshotParams)
+ *   2. Direct call:     execute(params: ScreenshotParams, ctx?: ScreenshotExecuteContext)
+ * The distinction is made by checking whether the first argument is a string.
  */
-export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentTool & { run: (params: ScreenshotParams) => Promise<ScreenshotResult> } {
+export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentTool & {
+	run: (params: ScreenshotParams, ctx?: ScreenshotExecuteContext) => Promise<ScreenshotResult>;
+} {
 	const defaultWidth = opts.defaultWidth ?? 1280;
 	const defaultHeight = opts.defaultHeight ?? 800;
 
@@ -169,11 +205,29 @@ export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentToo
 			fullPage: Type.Optional(Type.Boolean({ description: "Capture the full scrollable page height (default false)." })),
 		}),
 
+		/**
+		 * Supports two calling conventions:
+		 *   Agent pipeline:  execute(toolCallId: string, params: ScreenshotParams)
+		 *   Direct call:     execute(params: ScreenshotParams, ctx?: ScreenshotExecuteContext)
+		 */
 		async execute(
-			_toolCallId: string,
-			params: ScreenshotParams,
+			toolCallIdOrParams: string | ScreenshotParams,
+			paramsOrCtx?: ScreenshotParams | ScreenshotExecuteContext,
 		): Promise<ScreenshotResult> {
-			return captureScreenshot(params, defaultWidth, defaultHeight, opts.attachImage);
+			let params: ScreenshotParams;
+			let ctxAttachImage: ((mimeType: string, data: Buffer) => Promise<unknown> | unknown) | undefined;
+
+			if (typeof toolCallIdOrParams === "string") {
+				// Normal agent pipeline call: execute(toolCallId, params)
+				params = paramsOrCtx as ScreenshotParams;
+			} else {
+				// Direct call: execute(params, ctx?)
+				params = toolCallIdOrParams;
+				const ctx = paramsOrCtx as ScreenshotExecuteContext | undefined;
+				ctxAttachImage = ctx?.attachImage ?? ctx?.store?.attachImage;
+			}
+
+			return captureScreenshot(params, defaultWidth, defaultHeight, opts.attachImage, ctxAttachImage);
 		},
 
 		/**
@@ -182,36 +236,55 @@ export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentToo
 		 *   getTool('screenshot').run({ url: '...' })
 		 * and receive an image content part plus the PNG buffer in the attachImage callback.
 		 */
-		async run(params: ScreenshotParams): Promise<ScreenshotResult> {
-			return captureScreenshot(params, defaultWidth, defaultHeight, opts.attachImage);
+		async run(params: ScreenshotParams, ctx?: ScreenshotExecuteContext): Promise<ScreenshotResult> {
+			const ctxAttachImage = ctx?.attachImage ?? ctx?.store?.attachImage;
+			return captureScreenshot(params, defaultWidth, defaultHeight, opts.attachImage, ctxAttachImage);
 		},
-	} as unknown as AgentTool & { run: (params: ScreenshotParams) => Promise<ScreenshotResult> };
+	} as unknown as AgentTool & {
+		run: (params: ScreenshotParams, ctx?: ScreenshotExecuteContext) => Promise<ScreenshotResult>;
+	};
 }
 
 /**
  * Core screenshot capture logic, shared by execute() and run().
  * Separated so both entry points use identical paths and the browser
  * lifecycle management applies in both cases.
+ *
+ * After every capture the browser and BrowserServer are closed so that the
+ * Node.js event loop can drain naturally when the tool is called directly
+ * (tests, validators). The browser is re-launched lazily on the next call.
+ * This is safe in the agent worker loop because the process exits via
+ * process.exit() when the loop finishes anyway.
  */
 async function captureScreenshot(
 	params: ScreenshotParams,
 	defaultWidth: number,
 	defaultHeight: number,
-	attachImage?: ScreenshotToolOptions["attachImage"],
+	/** Factory-level callback: called as (buffer, mimeType). */
+	optsAttachImage?: ScreenshotToolOptions["attachImage"],
+	/** Context-level callback: called as (mimeType, buffer). */
+	ctxAttachImage?: (mimeType: string, data: Buffer) => Promise<unknown> | unknown,
 ): Promise<ScreenshotResult> {
 	const { url, selector, fullPage = false } = params;
 	const width = params.width ?? defaultWidth;
 	const height = params.height ?? defaultHeight;
 
 	const b = await getBrowser();
-	const context = await b.newContext({
-		viewport: { width, height },
-	});
-	const page = await context.newPage();
 
+	// Move newContext inside the try block so context.close() runs in finally
+	// even if newPage() throws.
+	let context: Awaited<ReturnType<Browser["newContext"]>> | undefined;
 	try {
-		// Use domcontentloaded for speed on data: URLs which have no network requests.
-		await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+		context = await b.newContext({
+			viewport: { width, height },
+		});
+		const page = await context.newPage();
+
+		// Use 'load' to ensure all synchronous scripts have run and the initial
+		// render is complete. This is important for pages that set background
+		// colours or text via inline styles/scripts — domcontentloaded fires too
+		// early and can capture a blank or partially-rendered page.
+		await page.goto(url, { waitUntil: "load", timeout: 30_000 });
 
 		let pngBuffer: Buffer;
 		if (selector) {
@@ -221,10 +294,13 @@ async function captureScreenshot(
 			pngBuffer = Buffer.from(await page.screenshot({ type: "png", fullPage }));
 		}
 
-		// Invoke the optional callback so direct callers (tests, validators) get the image
-		// without going through the full agent pipeline.
-		if (attachImage) {
-			await attachImage(pngBuffer, "image/png");
+		// Invoke the optional callbacks so direct callers (tests, validators) get
+		// the image without going through the full agent pipeline.
+		if (optsAttachImage) {
+			await optsAttachImage(pngBuffer, "image/png");
+		}
+		if (ctxAttachImage) {
+			await ctxAttachImage("image/png", pngBuffer);
 		}
 
 		const base64Data = pngBuffer.toString("base64");
@@ -252,10 +328,17 @@ async function captureScreenshot(
 			},
 		};
 	} finally {
-		await context.close();
-		// Unref only the browser's own subprocess (via BrowserServer.process()) after
-		// each context close so that scripts invoking the tool directly (validators,
-		// tests) exit naturally when done. We never touch unrelated handles.
-		unrefBrowserHandles();
+		try {
+			await context?.close();
+		} catch {
+			// ignore
+		}
+		// Close the browser after every capture so the Node.js event loop can drain
+		// naturally when the tool is invoked directly (tests, validators). The browser
+		// is re-launched lazily on the next call. We do NOT call unrefBrowserHandles()
+		// here — unreffing the chromium subprocess but not the WebSocket sockets is
+		// insufficient to release all event-loop handles, and unreffing stdin/other
+		// caller-owned handles would cause premature process exit (see a15).
+		await closeBrowser();
 	}
 }
