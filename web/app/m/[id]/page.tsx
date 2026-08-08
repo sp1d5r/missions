@@ -1,10 +1,12 @@
 import { notFound, redirect } from "next/navigation";
 import { AutoRefresh } from "@/components/auto-refresh";
 import { Denied, Ident, Tag, toneFor, type Tone } from "@/components/chrome";
+import { PanelErrorBoundary } from "@/components/error-boundary";
 import { MissionChat } from "@/components/mission-chat";
 import { MissionDiagrams } from "@/components/mission-diagrams";
 import { MissionLive } from "@/components/mission-live";
 import { MissionThread } from "@/components/mission-thread";
+import { ScopingDoc } from "@/components/scoping-doc";
 import { Shell, ThreadHead } from "@/components/shell";
 import { mission, record } from "@/lib/data";
 import { mayMutate, session } from "@/lib/guard";
@@ -51,6 +53,10 @@ export default async function Mission({ params }: { params: Promise<{ id: string
 			<div className="mission-split">
 				{/* ── overview: the structured, mostly-static record of what happened ── */}
 				<div className="mission-overview">
+					<PanelErrorBoundary label="scoping doc">
+						<ScopingDoc missionId={id} />
+					</PanelErrorBoundary>
+
 					{st && <MissionDiagrams state={st} />}
 
 					{/*
