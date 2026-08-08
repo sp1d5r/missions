@@ -496,10 +496,14 @@ textarea { resize: vertical; min-height: 76px; }
   padding: 5vh 5vw;
 }
 .diagram-modal {
+  /* A flex item without an explicit width shrinks to its content's intrinsic size instead of
+     filling the space justify-content:center left for it — the modal was rendering at the
+     diagram's own small natural size instead of actually going full-screen. */
+  width: min(1400px, 90vw);
   position: relative;
   background: var(--panel);
   border: 1px solid var(--hairline-bright);
-  max-width: 100%; max-height: 100%;
+  max-height: 100%;
   overflow: auto;
   padding: 20px;
 }
