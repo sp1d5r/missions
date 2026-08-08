@@ -44,7 +44,13 @@ const LIVE_THRESHOLD_MS = 15_000;
 /** Polling interval — 3 s is a comfortable balance between freshness and noise. */
 const POLL_MS = 3_000;
 
-function deriveStatus(payload: MissionLivePayload): {
+/** Local ticker interval — 1 s so quietForSeconds advances between polls. */
+const TICK_MS = 1_000;
+
+function deriveStatus(
+  payload: MissionLivePayload,
+  now?: number,
+): {
   activityStatus: ActivityStatus;
   quietForSeconds: number;
 } {
@@ -53,7 +59,9 @@ function deriveStatus(payload: MissionLivePayload): {
   }
 
   const updatedMs = Date.parse(payload.updatedAt);
-  const ageMs = Number.isNaN(updatedMs) ? Infinity : Date.now() - updatedMs;
+  const ageMs = Number.isNaN(updatedMs)
+    ? Infinity
+    : (now ?? Date.now()) - updatedMs;
 
   if (ageMs < LIVE_THRESHOLD_MS) {
     return { activityStatus: "live", quietForSeconds: 0 };
@@ -73,6 +81,16 @@ function deriveStatus(payload: MissionLivePayload): {
  * Pause rules:
  * - document.hidden → no requests
  * - mission.done    → no more requests needed (terminal state)
+ *
+ * Additional features vs the original implementation:
+ * - A 1 s local ticker advances quietForSeconds between polls so stalled
+ *   missions show time advancing even when the server returns the same updatedAt.
+ * - When `id` changes the internal done flag is reset so a new in-progress
+ *   mission is polled even if the previous mission was done.
+ * - The visibilitychange listener is registered before any early-return on
+ *   initialDone so a stale SSR "done" can recover on tab focus.
+ * - An inFlightRef guards against stacking duplicate fetches on rapid
+ *   visibility toggles.
  */
 export function useMissionLive(
   id: string,
@@ -86,19 +104,40 @@ export function useMissionLive(
     payload: null,
   });
 
-  // Keep a ref to the current payload so we can derive status in the interval
-  // without capturing a stale closure.
+  // Keep a ref to the current payload so we can derive status in the ticker
+  // interval without capturing a stale closure.
   const payloadRef = useRef<MissionLivePayload | null>(null);
+  // doneRef tracks the current mission's done state (reset on id change).
   const doneRef = useRef(initialDone);
+  // Guard against stacking simultaneous in-flight fetches.
+  const inFlightRef = useRef(false);
 
   useEffect(() => {
-    if (doneRef.current) return; // Already in terminal state — no polling needed.
+    // Reset done state for the new id so a previously-done mission doesn't
+    // suppress polling for a newly-selected in-progress mission.
+    doneRef.current = initialDone;
+    payloadRef.current = null;
+
+    // If already done according to the current initialDone, show done state
+    // immediately but still register the visibility listener so the hook can
+    // recover if this was a stale SSR value.
+    if (initialDone) {
+      setState({
+        activityStatus: "done",
+        quietForSeconds: 0,
+        recentLog: [],
+        payload: null,
+      });
+    }
 
     let cancelled = false;
-    let timer: ReturnType<typeof setInterval> | null = null;
+    let pollTimer: ReturnType<typeof setInterval> | null = null;
+    let tickTimer: ReturnType<typeof setInterval> | null = null;
 
     async function poll() {
-      if (cancelled || document.hidden) return;
+      if (cancelled || document.hidden || doneRef.current) return;
+      if (inFlightRef.current) return; // don't stack fetches
+      inFlightRef.current = true;
       try {
         const res = await fetch(`/api/m/${id}/state`, { cache: "no-store" });
         if (!res.ok || cancelled) return;
@@ -116,44 +155,95 @@ export function useMissionLive(
         setState({ activityStatus, quietForSeconds, recentLog, payload });
 
         // Stop polling once the mission reaches a terminal state.
-        if (payload.done && timer) {
-          clearInterval(timer);
-          timer = null;
+        if (payload.done) {
+          stopPoll();
+          stopTick();
         }
       } catch {
         // Network errors are silent — the last known state stays.
+      } finally {
+        inFlightRef.current = false;
       }
     }
 
-    function start() {
-      if (timer || doneRef.current) return;
+    /**
+     * Tick once per second to advance quietForSeconds between polls.
+     * This means the stalled counter updates on screen every second even
+     * when the server keeps returning the same updatedAt.
+     */
+    function tick() {
+      if (cancelled || doneRef.current) return;
+      const payload = payloadRef.current;
+      if (!payload) return;
+      const { activityStatus, quietForSeconds } = deriveStatus(payload);
+      setState((prev) => ({
+        ...prev,
+        activityStatus,
+        quietForSeconds,
+      }));
+    }
+
+    function startPoll() {
+      if (pollTimer || doneRef.current) return;
       poll(); // immediate first fetch
-      timer = setInterval(poll, POLL_MS);
+      pollTimer = setInterval(poll, POLL_MS);
+    }
+
+    function stopPoll() {
+      if (!pollTimer) return;
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+
+    function startTick() {
+      if (tickTimer || doneRef.current) return;
+      tickTimer = setInterval(tick, TICK_MS);
+    }
+
+    function stopTick() {
+      if (!tickTimer) return;
+      clearInterval(tickTimer);
+      tickTimer = null;
+    }
+
+    function start() {
+      startPoll();
+      startTick();
     }
 
     function stop() {
-      if (!timer) return;
-      clearInterval(timer);
-      timer = null;
+      stopPoll();
+      stopTick();
     }
 
     function onVisibility() {
       if (document.hidden) {
         stop();
       } else {
+        // On tab-show: if doneRef is still true from a stale SSR pass,
+        // we respect it (server confirmed done). If it was reset by an id
+        // change, start() will begin polling normally.
         start();
       }
     }
 
-    if (!document.hidden) start();
+    // Register visibility listener BEFORE any early-return so a stale SSR
+    // "done" can recover when the user focuses the tab.
     document.addEventListener("visibilitychange", onVisibility);
+
+    // Only start polling/ticking if not already done and tab is visible.
+    if (!doneRef.current && !document.hidden) {
+      start();
+    }
 
     return () => {
       cancelled = true;
+      inFlightRef.current = false;
       stop();
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [id]); // id is stable; intentionally not re-running on every render
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, initialDone]); // Re-run when id OR initialDone changes
 
   return state;
 }
