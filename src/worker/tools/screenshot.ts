@@ -21,60 +21,14 @@ let browserServer: BrowserServer | undefined;
 let browserPromise: Promise<Browser> | undefined;
 
 /**
- * Return the shared browser instance, launching it once on first call.
- *
- * We use chromium.launchServer() rather than chromium.launch() so that we
- * retain a reference to the BrowserServer, which exposes .process() — the
- * only correct way to obtain the chromium ChildProcess without walking the
- * global active-handles list.
- */
-async function getBrowser(): Promise<Browser> {
-	if (browser) return browser;
-	if (browserPromise) return browserPromise;
-
-	browserPromise = (async () => {
-		// Dynamic import so the module loads even when playwright is not installed.
-		const { chromium } = await import("playwright");
-		const server = await chromium.launchServer({ headless: true });
-		browserServer = server;
-		const b = await chromium.connect(server.wsEndpoint());
-		browser = b;
-
-		// On SIGINT/SIGTERM: await clean close before exiting so the chromium
-		// subprocess is not left as a zombie.
-		const handleSignal = async (signal: string) => {
-			try {
-				await b.close();
-			} catch {
-				// ignore
-			}
-			try {
-				await server.close();
-			} catch {
-				// ignore
-			}
-			browser = undefined;
-			browserServer = undefined;
-			browserPromise = undefined;
-			process.kill(process.pid, signal);
-		};
-		process.once("SIGINT", () => void handleSignal("SIGINT"));
-		process.once("SIGTERM", () => void handleSignal("SIGTERM"));
-
-		return b;
-	})();
-
-	return browserPromise;
-}
-
-/**
  * Close the browser and BrowserServer, resetting the singleton state so the
  * next call to getBrowser() will start a fresh instance.
  *
- * Closing all handles allows the Node.js event loop to drain naturally after
- * direct tool invocations (tests, validators) without requiring process.exit().
+ * Exported so callers (tests, validators, end-to-end scripts) can explicitly
+ * release browser resources after their last capture, allowing the Node.js
+ * event loop to drain without process.exit().
  */
-async function closeBrowser(): Promise<void> {
+export async function closeBrowser(): Promise<void> {
 	const b = browser;
 	const s = browserServer;
 	browser = undefined;
@@ -93,6 +47,64 @@ async function closeBrowser(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Module-level SIGINT/SIGTERM handler — registered exactly once.
+//
+// Calls closeBrowser() if a browser is active, then re-raises the signal so
+// the process exits with the correct signal-based exit code. Using
+// process.once() here (at module load time) ensures we never accumulate more
+// than one listener per signal regardless of how many times getBrowser() is
+// called or how many tool instances are created.
+// ---------------------------------------------------------------------------
+const handleShutdownSignal = async (signal: string) => {
+	await closeBrowser();
+	process.kill(process.pid, signal);
+};
+
+process.once("SIGINT", () => void handleShutdownSignal("SIGINT"));
+process.once("SIGTERM", () => void handleShutdownSignal("SIGTERM"));
+
+/**
+ * Return the shared browser instance, launching it once on first call.
+ *
+ * We use chromium.launchServer() rather than chromium.launch() so that we
+ * retain a reference to the BrowserServer, which exposes .process() — the
+ * only correct way to obtain the chromium ChildProcess without walking the
+ * global active-handles list.
+ *
+ * The BrowserServer child process is unref()ed immediately after launch so
+ * that it does not keep the Node.js event loop alive between captures. During
+ * an active capture the context / page handles are reffed by Node internally,
+ * so the loop stays alive while work is in flight. After the capture context
+ * is closed the loop can drain naturally.
+ */
+async function getBrowser(): Promise<Browser> {
+	if (browser) return browser;
+	if (browserPromise) return browserPromise;
+
+	browserPromise = (async () => {
+		// Dynamic import so the module loads even when playwright is not installed.
+		const { chromium } = await import("playwright");
+		const server = await chromium.launchServer({ headless: true });
+		browserServer = server;
+
+		// Unref the child process so it does not keep the Node.js event loop
+		// alive. The process will still be cleaned up correctly on closeBrowser()
+		// or when the SIGINT/SIGTERM handler fires.
+		try {
+			server.process().unref();
+		} catch {
+			// Older Playwright versions may not expose .process() — ignore.
+		}
+
+		const b = await chromium.connect(server.wsEndpoint());
+		browser = b;
+		return b;
+	})();
+
+	return browserPromise;
+}
+
+// ---------------------------------------------------------------------------
 // Tool factory
 // ---------------------------------------------------------------------------
 
@@ -106,6 +118,10 @@ export interface ScreenshotToolOptions {
 	 * Called with the raw PNG buffer and MIME type (buffer first).
 	 * Lets callers collect image data without going through the full agent pipeline
 	 * (e.g. in tests that invoke the tool directly by name).
+	 *
+	 * If a context-level attachImage is also provided via the execute/run ctx
+	 * argument, only the context-level one is called (ctx wins). This prevents
+	 * the same image being attached twice when both callbacks are present.
 	 */
 	attachImage?: (data: Buffer, mimeType: string) => Promise<unknown> | unknown;
 }
@@ -174,7 +190,8 @@ export interface ScreenshotExecuteContext {
  * The returned tool object also exposes a `run(params, ctx?)` method for direct invocation by name
  * (e.g. from tests or external callers that do `getTool('screenshot').run(params)` without
  * going through the full agent pipeline). If an `attachImage` callback was provided in opts,
- * it is called with (buffer, mimeType) after each successful capture.
+ * it is called with (buffer, mimeType) after each successful capture — unless a ctx.attachImage
+ * is also present, in which case only the ctx one is called (deduplication).
  *
  * execute() supports two calling conventions:
  *   1. Agent pipeline:  execute(toolCallId: string, params: ScreenshotParams)
@@ -183,6 +200,7 @@ export interface ScreenshotExecuteContext {
  */
 export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentTool & {
 	run: (params: ScreenshotParams, ctx?: ScreenshotExecuteContext) => Promise<ScreenshotResult>;
+	close: () => Promise<void>;
 } {
 	const defaultWidth = opts.defaultWidth ?? 1280;
 	const defaultHeight = opts.defaultHeight ?? 800;
@@ -240,8 +258,16 @@ export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentToo
 			const ctxAttachImage = ctx?.attachImage ?? ctx?.store?.attachImage;
 			return captureScreenshot(params, defaultWidth, defaultHeight, opts.attachImage, ctxAttachImage);
 		},
+
+		/**
+		 * Explicitly close the shared browser, releasing all event-loop handles.
+		 * Call this after the last capture when the browser is no longer needed.
+		 * The SIGINT/SIGTERM handler also calls this automatically.
+		 */
+		close: closeBrowser,
 	} as unknown as AgentTool & {
 		run: (params: ScreenshotParams, ctx?: ScreenshotExecuteContext) => Promise<ScreenshotResult>;
+		close: () => Promise<void>;
 	};
 }
 
@@ -250,19 +276,26 @@ export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentToo
  * Separated so both entry points use identical paths and the browser
  * lifecycle management applies in both cases.
  *
- * After every capture the browser and BrowserServer are closed so that the
- * Node.js event loop can drain naturally when the tool is called directly
- * (tests, validators). The browser is re-launched lazily on the next call.
- * This is safe in the agent worker loop because the process exits via
- * process.exit() when the loop finishes anyway.
+ * The browser singleton is NOT closed after each capture — it is reused across
+ * subsequent calls for efficiency. The BrowserServer child process is unref()ed
+ * at launch time so it does not keep the Node.js event loop alive between
+ * captures. Callers that need the process to exit cleanly after their last
+ * capture should either:
+ *   a) call tool.close() / closeBrowser() explicitly, or
+ *   b) use process.exit() (as the worker loop does), or
+ *   c) rely on the SIGINT/SIGTERM handler registered at module load time.
+ *
+ * attachImage deduplication: if ctx provides an attachImage callback, only that
+ * one is called. The opts-level callback is only called when no ctx callback is
+ * present. This prevents the same image being stored/transmitted twice.
  */
 async function captureScreenshot(
 	params: ScreenshotParams,
 	defaultWidth: number,
 	defaultHeight: number,
-	/** Factory-level callback: called as (buffer, mimeType). */
+	/** Factory-level callback: called as (buffer, mimeType). Only used when no ctx callback. */
 	optsAttachImage?: ScreenshotToolOptions["attachImage"],
-	/** Context-level callback: called as (mimeType, buffer). */
+	/** Context-level callback: called as (mimeType, buffer). Takes priority over opts callback. */
 	ctxAttachImage?: (mimeType: string, data: Buffer) => Promise<unknown> | unknown,
 ): Promise<ScreenshotResult> {
 	const { url, selector, fullPage = false } = params;
@@ -294,13 +327,14 @@ async function captureScreenshot(
 			pngBuffer = Buffer.from(await page.screenshot({ type: "png", fullPage }));
 		}
 
-		// Invoke the optional callbacks so direct callers (tests, validators) get
-		// the image without going through the full agent pipeline.
-		if (optsAttachImage) {
-			await optsAttachImage(pngBuffer, "image/png");
-		}
+		// Deduplicated attachImage invocation:
+		//   - If a context-level callback is provided, use it (ctx wins).
+		//   - Otherwise fall back to the factory opts callback.
+		// This prevents the same image being attached twice when both are present.
 		if (ctxAttachImage) {
 			await ctxAttachImage("image/png", pngBuffer);
+		} else if (optsAttachImage) {
+			await optsAttachImage(pngBuffer, "image/png");
 		}
 
 		const base64Data = pngBuffer.toString("base64");
@@ -333,12 +367,7 @@ async function captureScreenshot(
 		} catch {
 			// ignore
 		}
-		// Close the browser after every capture so the Node.js event loop can drain
-		// naturally when the tool is invoked directly (tests, validators). The browser
-		// is re-launched lazily on the next call. We do NOT call unrefBrowserHandles()
-		// here — unreffing the chromium subprocess but not the WebSocket sockets is
-		// insufficient to release all event-loop handles, and unreffing stdin/other
-		// caller-owned handles would cause premature process exit (see a15).
-		await closeBrowser();
+		// The browser is intentionally NOT closed here. The singleton is reused
+		// across captures. See closeBrowser() and tool.close() for explicit teardown.
 	}
 }
