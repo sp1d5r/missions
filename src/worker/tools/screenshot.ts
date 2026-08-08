@@ -18,6 +18,15 @@ import { Type, type AgentTool } from "../../pi.js";
 
 let browser: Browser | undefined;
 let browserPromise: Promise<Browser> | undefined;
+let browserLaunchCount = 0;
+
+/**
+ * Returns how many times the browser was launched in this process.
+ * Exposed for testing (a21) to verify browser singleton reuse.
+ */
+export function getBrowserInstanceCountForTest(): number {
+	return browserLaunchCount;
+}
 
 
 
@@ -29,9 +38,9 @@ let browserPromise: Promise<Browser> | undefined;
  * release browser resources after their last capture, allowing the Node.js
  * event loop to drain without process.exit().
  *
- * This is also called automatically at the end of every captureScreenshot()
- * invocation so the Playwright child-process handles are released after each
- * capture and the Node.js event loop is free to drain.
+ * Call this once the process no longer needs the browser (e.g. from
+ * runWorker's finally block). The Node.js event loop will drain naturally
+ * once the browser process is closed.
  */
 export async function closeBrowser(): Promise<void> {
 	const b = browser;
@@ -53,10 +62,9 @@ export async function closeBrowser(): Promise<void> {
  *
  * No module-scope signal handlers are registered. Callers are responsible for
  * calling closeBrowser() during their own shutdown paths (e.g. via the exported
- * close() on the tool, or a worker/CLI teardown sequence). The browser is also
- * closed automatically at the end of every captureScreenshot() call so that
- * Playwright child-process handles are released and the Node.js event loop can
- * drain without process.exit().
+ * close() on the tool, or a worker/CLI teardown sequence such as runWorker's
+ * finally block in worker.ts). The browser singleton is reused across captures
+ * within the same process for performance.
  *
  * On rejection, browserPromise is cleared so a retry will re-launch.
  */
@@ -70,6 +78,7 @@ async function getBrowser(): Promise<Browser> {
 
 		const b = await chromium.launch({ headless: true });
 		browser = b;
+		browserLaunchCount++;
 		return b;
 	};
 
@@ -260,7 +269,7 @@ export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentToo
 		/**
 		 * Explicitly close the shared browser, releasing all event-loop handles.
 		 * Call this after the last capture when the browser is no longer needed.
-		 * The SIGINT/SIGTERM handler also calls this automatically.
+		 * runWorker's finally block already calls closeBrowser() automatically.
 		 */
 		close: closeBrowser,
 	} as unknown as AgentTool & {
@@ -273,18 +282,10 @@ export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentToo
  * Core screenshot capture logic, shared by execute() and run().
  *
  * Event-loop lifecycle:
- *   Playwright's browser child process keeps the Node.js event loop alive
- *   regardless of ref/unref calls (the internal handle paths Playwright uses
- *   vary across versions and the unref approach via private internals is
- *   unreliable). To guarantee the process can exit after a capture, the
- *   browser is explicitly closed at the end of every capture via closeBrowser().
- *   The browser singleton is recreated on the next call to captureScreenshot().
- *
- * Performance note: closing and reopening the browser on every capture adds
- * ~1-3 s overhead per call. This is acceptable for one-off tool invocations.
- * For bulk captures in the same process, callers that need higher throughput
- * can call captureScreenshot() in sequence (each call relaunches chromium) or
- * use Playwright directly.
+ *   The browser singleton is kept alive across captures for performance.
+ *   The caller (runWorker's finally block) is responsible for calling
+ *   closeBrowser() once all captures are done so the Playwright child-process
+ *   handles are released and the Node.js event loop can drain.
  *
  * attachImage deduplication: if ctx provides an attachImage callback, only that
  * one is called. The opts-level callback is only called when no ctx callback is
@@ -363,12 +364,10 @@ async function captureScreenshot(
 		} catch {
 			// ignore
 		}
-		// Always close the browser after each capture so Playwright's child-process
-		// handles are fully released and the Node.js event loop can drain without
-		// a process.exit() call. The unref()-via-private-internals strategy is
-		// unreliable across Playwright versions; explicit close is the only
-		// guaranteed approach.
-		await closeBrowser();
+		// The browser singleton is intentionally kept alive across captures so it
+		// can be reused within the same process (performance). The caller is
+		// responsible for closing it via closeBrowser() (e.g. runWorker's finally
+		// block in worker.ts already does this).
 	}
 	return result!;
 }

@@ -128,13 +128,10 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult
 			tools: [
 				...createCodingTools(cwd, env ? { bash: { spawnHook: (ctx) => ({ ...ctx, env }) } } : undefined),
 				// Headless-browser screenshot — reusable by any future mission.
-				// Wire attachImage so captured screenshots flow through onProgress into
-				// the mission store (same path as tool_execution_end image extraction).
-				createScreenshotTool({
-					attachImage: onProgress
-						? (data: Buffer, mimeType: string) => onProgress({ type: "image", data, mimeType, toolName: "screenshot" })
-						: undefined,
-				}),
+				// Do NOT wire attachImage here: extractImageParts on tool_execution_end
+				// is the single source that feeds onProgress → store.attachImage.
+				// Wiring both would deliver two image events per capture.
+				createScreenshotTool(),
 				// Read-only fan-out. Scout spend is charged straight to this worker's total,
 				// so delegating is a budget decision the same as any other tool call.
 				...(scouts?.length
