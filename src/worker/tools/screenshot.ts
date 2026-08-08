@@ -10,7 +10,7 @@
  * src/worker.ts alongside createCodingTools() and createDelegateTool().
  */
 
-import { type Browser } from "playwright";
+import { type Browser, type BrowserServer } from "playwright";
 import { Type, type AgentTool } from "../../pi.js";
 
 // ---------------------------------------------------------------------------
@@ -18,11 +18,19 @@ import { Type, type AgentTool } from "../../pi.js";
 // ---------------------------------------------------------------------------
 
 let browser: Browser | undefined;
+let browserServer: BrowserServer | undefined;
 let browserPromise: Promise<Browser> | undefined;
 
 /**
  * Return the shared browser instance, launching it once on first call.
- * The process-exit handler ensures it is closed cleanly.
+ *
+ * We use chromium.launchServer() rather than chromium.launch() so that we
+ * retain a reference to the BrowserServer, which exposes .process() — the
+ * only correct way to obtain the chromium ChildProcess without walking the
+ * global active-handles list.
+ *
+ * The process-exit handler ensures both the Browser connection and the
+ * BrowserServer are closed cleanly.
  */
 async function getBrowser(): Promise<Browser> {
 	if (browser) return browser;
@@ -31,10 +39,15 @@ async function getBrowser(): Promise<Browser> {
 	browserPromise = (async () => {
 		// Dynamic import so the module loads even when playwright is not installed.
 		const { chromium } = await import("playwright");
-		const b = await chromium.launch({ headless: true });
+		const server = await chromium.launchServer({ headless: true });
+		browserServer = server;
+		const b = await chromium.connect(server.wsEndpoint());
 		browser = b;
 		// Clean up on any exit so the browser process does not become a zombie.
-		const cleanup = () => { b.close().catch(() => {}); };
+		const cleanup = () => {
+			b.close().catch(() => {});
+			server.close().catch(() => {});
+		};
 		process.once("exit", cleanup);
 		process.once("SIGINT", cleanup);
 		process.once("SIGTERM", cleanup);
@@ -45,28 +58,29 @@ async function getBrowser(): Promise<Browser> {
 }
 
 /**
- * Unref the browser's underlying OS handles so the Node.js process can exit
- * naturally when there is no other work pending. Called after each context is
- * closed (i.e. after each screenshot capture). The browser itself stays alive
- * as a singleton — only the handles are released from the event-loop reference
- * count. On process exit the registered cleanup handler closes the browser.
+ * Unref the browser's own subprocess so the Node.js process can exit naturally
+ * when there is no other work pending.
+ *
+ * We call BrowserServer.process() — the Playwright-sanctioned API for obtaining
+ * the chromium ChildProcess — and unref only that process and its stdio streams.
+ * No other event-loop handles are touched (no stdin, no TTY sockets, no
+ * unrelated child processes).
  *
  * This is needed so that scripts that call tool.run() directly (e.g. validators
  * and tests) do not have to call process.exit() explicitly after the capture
  * finishes.
  */
 function unrefBrowserHandles(): void {
-	const getHandles = (process as NodeJS.Process & { _getActiveHandles?(): unknown[] })._getActiveHandles;
-	if (typeof getHandles !== "function") return;
-	for (const h of getHandles.call(process)) {
-		const handle = h as { constructor: { name: string }; unref?: () => void; stdin?: { unref?: () => void }; stdout?: { unref?: () => void }; stderr?: { unref?: () => void } };
-		if (handle.constructor.name === "ChildProcess" || handle.constructor.name === "Socket") {
-			handle.unref?.();
-			handle.stdin?.unref?.();
-			handle.stdout?.unref?.();
-			handle.stderr?.unref?.();
-		}
-	}
+	if (!browserServer) return;
+	const child = browserServer.process();
+	if (!child) return;
+	child.unref();
+	// The stdio streams on ChildProcess are typed as Writable/Readable but are
+	// actually Socket instances at runtime; cast to access unref().
+	type Unrefable = { unref?: () => void };
+	(child.stdin as Unrefable | null)?.unref?.();
+	(child.stdout as Unrefable | null)?.unref?.();
+	(child.stderr as Unrefable | null)?.unref?.();
 }
 
 // ---------------------------------------------------------------------------
@@ -239,8 +253,9 @@ async function captureScreenshot(
 		};
 	} finally {
 		await context.close();
-		// Unref the browser's OS handles after the context is closed so that scripts
-		// invoking the tool directly (validators, tests) exit naturally when done.
+		// Unref only the browser's own subprocess (via BrowserServer.process()) after
+		// each context close so that scripts invoking the tool directly (validators,
+		// tests) exit naturally when done. We never touch unrelated handles.
 		unrefBrowserHandles();
 	}
 }
