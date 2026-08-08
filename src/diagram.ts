@@ -64,6 +64,12 @@ function arrow(x1: number, y: number, x2: number): string {
 	return `<line x1="${x1}" y1="${y}" x2="${x2}" y2="${y}" stroke="${THEME.hairlineBright}" stroke-width="1" marker-end="url(#a)"/>`;
 }
 
+/** Elbow connector for a row wrap: down from (x1,y1), across, then down into (x2,y2). */
+function elbowDown(x1: number, y1: number, x2: number, y2: number): string {
+	const midY = (y1 + y2) / 2;
+	return `<path d="M${x1} ${y1} L${x1} ${midY} L${x2} ${midY} L${x2} ${y2}" fill="none" stroke="${THEME.hairlineBright}" stroke-width="1" marker-end="url(#a)"/>`;
+}
+
 const VERDICT_STROKE: Record<MilestoneVerdict, string> = {
 	passed: THEME.ok,
 	"corrections-scoped": THEME.live,
@@ -101,51 +107,70 @@ export function missionFlowSvg(state: MissionState): string {
 		);
 	}
 
-	// Divide the canvas between the milestones rather than sizing each to its content,
-	// so two milestones read as two big panels instead of two stamps in a wide box.
+	// Wrap into a fixed number of columns per row instead of squeezing every milestone into
+	// one ever-widening row. Past 3-4 milestones a single row either shrank each box below
+	// readable width or forced horizontal scrolling to follow the chain left to right — the
+	// exact case a long-running corrective loop hits. Wrapping keeps each box a fixed,
+	// readable width and grows the diagram downward instead, which is the direction the page
+	// already scrolls.
 	const n = milestones.length;
-	const GAP = n > 1 ? Math.max(48, Math.min(88, Math.round((CANVAS - PAD * 2) * 0.07))) : 0;
-	const NW = Math.max(190, Math.floor((CANVAS - PAD * 2 - (n - 1) * GAP) / n));
+	const COLS = Math.min(n, 3);
+	const rowCount = Math.ceil(n / COLS);
+	const GAP = COLS > 1 ? Math.max(48, Math.min(88, Math.round((CANVAS - PAD * 2) * 0.07))) : 0;
+	const NW = Math.max(190, Math.floor((CANVAS - PAD * 2 - (COLS - 1) * GAP) / COLS));
+	const ROW_GAP = 64; // vertical space between rows — room for the wrap connector + verdict caption
 
 	// Vertical rhythm, stated once so the divider cannot drift into the text above it
 	// or leave a dead band below the score. All offsets are from the node's top edge.
 	const LINE = 19;
 	const LABEL_Y = 20; // "MILESTONE n"
 	const FIRST_ROW_Y = 40; // first feature baseline
-	const rows = (m: MilestoneRecord) => Math.max(1, m.featureIds.length);
+	const featureRows = (m: MilestoneRecord) => Math.max(1, m.featureIds.length);
 	const dividerY = (r: number) => FIRST_ROW_Y + (r - 1) * LINE + 12;
 	const scoreY = (r: number) => dividerY(r) + 17;
-	const nodeH = (m: MilestoneRecord) => scoreY(rows(m)) + 12;
-	const maxH = Math.max(...milestones.map(nodeH));
-	const width = PAD * 2 + n * NW + (n - 1) * GAP;
-	const height = TOP + maxH + 40;
+	const nodeH = (m: MilestoneRecord) => scoreY(featureRows(m)) + 12;
+
+	// Each row's height is its tallest node, so a milestone with more features doesn't clip
+	// a shorter neighbour sharing its row.
+	const rowHeights: number[] = [];
+	for (let r = 0; r < rowCount; r++) {
+		const rowMilestones = milestones.slice(r * COLS, r * COLS + COLS);
+		rowHeights.push(Math.max(...rowMilestones.map(nodeH)));
+	}
+	const rowTop = (r: number): number => TOP + rowHeights.slice(0, r).reduce((sum, h) => sum + h + ROW_GAP, 0);
+
+	const width = PAD * 2 + COLS * NW + (COLS - 1) * GAP;
+	const height = rowTop(rowCount - 1) + rowHeights[rowCount - 1] + 40;
 
 	const parts: string[] = [ARROW_DEF];
 
 	milestones.forEach((m, i) => {
-		const x = PAD + i * (NW + GAP);
+		const r = Math.floor(i / COLS);
+		const c = i % COLS;
+		const x = PAD + c * (NW + GAP);
+		const y = rowTop(r);
 		const h = nodeH(m);
 		const stroke = VERDICT_STROKE[m.verdict] ?? THEME.hairline;
 
-		parts.push(box(x, TOP, NW, h, THEME.hairline));
-		parts.push(ticks(x, TOP, NW, h, stroke, 8));
-		parts.push(textEl(x + 14, TOP + LABEL_Y, `MILESTONE ${m.index}`, { fill: THEME.textDim, size: LABEL }));
+		parts.push(box(x, y, NW, h, THEME.hairline));
+		parts.push(ticks(x, y, NW, h, stroke, 8));
+		parts.push(textEl(x + 14, y + LABEL_Y, `MILESTONE ${m.index}`, { fill: THEME.textDim, size: LABEL }));
 
 		// Features that ran in this milestone.
-		m.featureIds.forEach((fid, r) => {
+		m.featureIds.forEach((fid, fr) => {
 			const h2 = m.handoffs.find((x2) => x2.featureId === fid);
 			const done = h2?.completed ? h2.completed.replace(/\s+/g, " ") : "";
-			const y = TOP + FIRST_ROW_Y + r * LINE;
-			parts.push(textEl(x + 14, y, fid, { fill: THEME.text, weight: 600 }));
+			const fy = y + FIRST_ROW_Y + fr * LINE;
+			parts.push(textEl(x + 14, fy, fid, { fill: THEME.text, weight: 600 }));
 			if (done) {
 				const off = 14 + (fid.length + 2) * BODY * CHAR_EM;
-				parts.push(textEl(x + off, y, fit(done, NW - off - 14), { fill: THEME.textDim }));
+				parts.push(textEl(x + off, fy, fit(done, NW - off - 14), { fill: THEME.textDim }));
 			}
 		});
 
 		// Validation result — the only number that decides whether we loop.
-		const dy = TOP + dividerY(rows(m));
-		const vy = TOP + scoreY(rows(m));
+		const dy = y + dividerY(featureRows(m));
+		const vy = y + scoreY(featureRows(m));
 		const sc = m.scoreCard;
 		const allPassed = sc.assertionsPassed === sc.assertionsTotal;
 		parts.push(`<line x1="${x}" y1="${dy}" x2="${x + NW}" y2="${dy}" stroke="${THEME.hairline}"/>`);
@@ -157,14 +182,25 @@ export function missionFlowSvg(state: MissionState): string {
 		if (sc.bugs.length) parts.push(textEl(x + NW - 14, vy, `${sc.bugs.length} bug${sc.bugs.length > 1 ? "s" : ""}`, { fill: THEME.warn, anchor: "end" }));
 
 		// Verdict caption under the node.
-		parts.push(textEl(x + 14, TOP + h + 22, VERDICT_TEXT[m.verdict] ?? m.verdict, { fill: stroke, size: LABEL }));
+		parts.push(textEl(x + 14, y + h + 22, VERDICT_TEXT[m.verdict] ?? m.verdict, { fill: stroke, size: LABEL }));
 
 		if (i < milestones.length - 1) {
-			const ay = TOP + h / 2;
-			parts.push(arrow(x + NW + 8, ay, x + NW + GAP - 5));
-			// Name what sent us round again.
 			const via = m.correctionIds.length ? m.correctionIds.join(" ") : "retry";
-			parts.push(textEl(x + NW + GAP / 2, ay - 10, fit(via, GAP, LABEL), { fill: THEME.textDim, size: LABEL, anchor: "middle" }));
+			const wrapsRow = c === COLS - 1;
+			if (!wrapsRow) {
+				// Same row: straight arrow to the right, as before.
+				const ay = y + h / 2;
+				parts.push(arrow(x + NW + 8, ay, x + NW + GAP - 5));
+				parts.push(textEl(x + NW + GAP / 2, ay - 10, fit(via, GAP, LABEL), { fill: THEME.textDim, size: LABEL, anchor: "middle" }));
+			} else {
+				// End of row: elbow down to the first column of the next row.
+				const x1 = x + NW / 2;
+				const y1 = y + h;
+				const x2 = PAD + NW / 2;
+				const y2 = rowTop(r + 1);
+				parts.push(elbowDown(x1, y1, x2, y2));
+				parts.push(textEl(Math.min(x1, x2) + Math.abs(x1 - x2) / 2, (y1 + y2) / 2 - 6, fit(via, NW, LABEL), { fill: THEME.textDim, size: LABEL, anchor: "middle" }));
+			}
 		}
 	});
 

@@ -17,6 +17,8 @@ import { useEffect, useRef, useState } from "react";
 export function ArchDiagram({ source, theme }: { source: string; theme: Record<string, string> }) {
 	const ref = useRef<HTMLDivElement>(null);
 	const [error, setError] = useState<string | null>(null);
+	const [svgMarkup, setSvgMarkup] = useState<string | null>(null);
+	const [open, setOpen] = useState(false);
 
 	useEffect(() => {
 		let alive = true;
@@ -37,7 +39,13 @@ export function ArchDiagram({ source, theme }: { source: string; theme: Record<s
 				// drawing when the plan changes.
 				const id = `arch-${Math.random().toString(36).slice(2)}`;
 				const { svg } = await mermaid.render(id, source);
-				if (alive && ref.current) ref.current.innerHTML = svg;
+				if (alive && ref.current) {
+					ref.current.innerHTML = svg;
+					// Kept for the zoomed modal copy — mermaid renders once into the DOM, but the
+					// modal needs a second, larger instance of the same markup rather than a live
+					// re-render (mermaid ids are one-shot; rendering `source` twice would collide).
+					setSvgMarkup(svg);
+				}
 			} catch (err) {
 				// A model wrote this source. It will occasionally be unparseable, and a broken
 				// diagram must not take the mission page down with it.
@@ -49,6 +57,15 @@ export function ArchDiagram({ source, theme }: { source: string; theme: Record<s
 		};
 	}, [source, theme]);
 
+	useEffect(() => {
+		if (!open) return;
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key === "Escape") setOpen(false);
+		};
+		document.addEventListener("keydown", onKey);
+		return () => document.removeEventListener("keydown", onKey);
+	}, [open]);
+
 	if (error) {
 		return (
 			<div>
@@ -59,5 +76,33 @@ export function ArchDiagram({ source, theme }: { source: string; theme: Record<s
 			</div>
 		);
 	}
-	return <div className="arch" ref={ref} />;
+	return (
+		<>
+			<div
+				className="arch diagram-zoom-trigger"
+				ref={ref}
+				role={svgMarkup ? "button" : undefined}
+				tabIndex={svgMarkup ? 0 : undefined}
+				onClick={() => svgMarkup && setOpen(true)}
+				onKeyDown={(e) => {
+					if (svgMarkup && (e.key === "Enter" || e.key === " ")) {
+						e.preventDefault();
+						setOpen(true);
+					}
+				}}
+				aria-label={svgMarkup ? "Open system diagram full size" : undefined}
+			/>
+			{open && svgMarkup && (
+				<div className="diagram-modal-backdrop" onClick={() => setOpen(false)}>
+					<div className="diagram-modal" onClick={(e) => e.stopPropagation()}>
+						<button type="button" className="diagram-modal-close" onClick={() => setOpen(false)} aria-label="Close">
+							×
+						</button>
+						{/* biome-ignore lint/security/noDangerouslySetInnerHtml: mermaid's own render output */}
+						<div className="diagram-modal-canvas" dangerouslySetInnerHTML={{ __html: svgMarkup }} />
+					</div>
+				</div>
+			)}
+		</>
+	);
 }

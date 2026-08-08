@@ -1,8 +1,49 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import type { AssertionStrength, CheckResult } from "../types.js";
 
 const CHECK_TIMEOUT_MS = 300_000;
 const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Process names known to detach themselves into their own session/process group when a browser
+ * automation library launches them — so `process.kill(-child.pid)` (killing OUR process group)
+ * can never reach them. Playwright's `chromium.launchServer()` is the concrete case that bit us:
+ * it spawns chrome-headless-shell with `detached: true` by design (so a persistent browser server
+ * can outlive its launcher), which is exactly wrong for a one-shot validator script that never
+ * calls the tool's own closeBrowser() before exiting. The browser then sits forever holding
+ * stdout/stderr open, which is what actually causes runCheck's synchronous read to hang.
+ */
+const DETACHED_BROWSER_PROCESS_NAMES = ["chrome-headless-shell", "Chromium", "chromium"];
+
+/** PIDs of the given process names currently running, macOS/Linux `ps` — best-effort. */
+function snapshotBrowserPids(): Set<string> {
+	try {
+		const res = spawnSync("ps", ["-eo", "pid,comm"], { encoding: "utf-8", timeout: 5_000 });
+		const pids = new Set<string>();
+		for (const line of (res.stdout ?? "").split("\n")) {
+			if (DETACHED_BROWSER_PROCESS_NAMES.some((name) => line.includes(name))) {
+				const pid = line.trim().split(/\s+/)[0];
+				if (pid) pids.add(pid);
+			}
+		}
+		return pids;
+	} catch {
+		return new Set();
+	}
+}
+
+/** Kill any browser process from `DETACHED_BROWSER_PROCESS_NAMES` not present in `before`. */
+function killNewBrowserOrphans(before: Set<string>): void {
+	const after = snapshotBrowserPids();
+	for (const pid of after) {
+		if (before.has(pid)) continue;
+		try {
+			process.kill(Number(pid), "SIGKILL");
+		} catch {
+			/* already gone */
+		}
+	}
+}
 
 /** Exit code we report for a command the harness refused to run. Distinct from any real failure. */
 export const REFUSED_EXIT_CODE = 126;
@@ -47,14 +88,13 @@ export function runCheck(options: RunCheckOptions): Promise<CheckResult> {
 		// Deliberately `-c`, not `-lc`: a login shell sources the user's profile, so an assertion's
 		// environment would differ from the worker's and drift with whatever is in ~/.zshrc.
 		//
-		// `detached: true` makes bash the leader of its own process group instead of sharing ours.
-		// That's what makes the timeout below actually work: assertions that launch a browser
-		// (Playwright/Chromium) can leave orphaned utility/gpu/renderer helper processes behind
-		// that inherit bash's stdout/stderr pipes and keep them open even after bash exits. A plain
-		// `spawnSync(..., {timeout})` only ever signals the immediate bash pid — those orphans keep
-		// the pipe alive and the synchronous read blocks forever, so the stated timeout never fires.
-		// Killing the whole *group* (`-child.pid`) reaps the orphans along with bash, which is what
-		// actually closes the pipe.
+		// `detached: true` makes bash the leader of its own process group instead of sharing ours,
+		// so a plain SIGKILL to bash's group reaps most stray children along with it. It does NOT
+		// reap a Playwright-launched browser, though: chromium.launchServer() spawns chrome with its
+		// own `detached: true`, deliberately escaping bash's process group so a persistent browser
+		// server can outlive its launcher. That's the browser-specific case killNewBrowserOrphans
+		// handles below — see DETACHED_BROWSER_PROCESS_NAMES for the full story.
+		const browserPidsBefore = snapshotBrowserPids();
 		const child = spawn("bash", ["-c", command], {
 			cwd,
 			env: env ?? process.env,
@@ -73,6 +113,7 @@ export function runCheck(options: RunCheckOptions): Promise<CheckResult> {
 					/* group already gone */
 				}
 			}
+			killNewBrowserOrphans(browserPidsBefore);
 			settle(null, true);
 		}, CHECK_TIMEOUT_MS);
 
@@ -92,7 +133,14 @@ export function runCheck(options: RunCheckOptions): Promise<CheckResult> {
 			resolve({ command, exitCode, passed: exitCode === expectedExitCode, output });
 		}
 
-		child.on("exit", (code) => settle(code, false));
+		child.on("exit", (code) => {
+			// Even on a clean, non-timed-out exit, a command that launched a browser and never
+			// called the worker's own closeBrowser() leaves it running forever (it's detached and
+			// unref()'d by design). Sweep it here too, not just on timeout — this is what actually
+			// stops orphans from accumulating across dozens of validator re-runs.
+			killNewBrowserOrphans(browserPidsBefore);
+			settle(code, false);
+		});
 		child.on("error", () => settle(127, false));
 	});
 }

@@ -2,6 +2,7 @@ import { contractMapSvg, mermaidSource, missionFlowSvg } from "@missions/diagram
 import type { MissionState } from "@missions/types.js";
 import { ArchDiagram } from "@/components/arch-diagram";
 import { CopyButton } from "@/components/copy-button";
+import { ZoomableSvg } from "@/components/zoomable-svg";
 
 /**
  * The mission as a picture, sticky above everything else.
@@ -70,16 +71,18 @@ export function MissionDiagrams({ state }: { state: MissionState }) {
 				{flow && (
 					<figure className="diagram">
 						<figcaption className="label">flow</figcaption>
-						{/* biome-ignore lint/security/noDangerouslySetInnerHtml: our own SVG, every text node escaped by esc() */}
-						<div className="canvas" dangerouslySetInnerHTML={{ __html: flow }} />
+						<div className="canvas">
+							<ZoomableSvg html={flow} label="flow" />
+						</div>
 					</figure>
 				)}
 
 				{contract && (
 					<figure className="diagram">
 						<figcaption className="label">contract — what proved what</figcaption>
-						{/* biome-ignore lint/security/noDangerouslySetInnerHtml: our own SVG, every text node escaped by esc() */}
-						<div className="canvas" dangerouslySetInnerHTML={{ __html: contract }} />
+						<div className="canvas">
+							<ZoomableSvg html={contract} label="contract" />
+						</div>
 					</figure>
 				)}
 

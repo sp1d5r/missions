@@ -48,119 +48,122 @@ export default async function Mission({ params }: { params: Promise<{ id: string
 				</div>
 			</ThreadHead>
 
-			{/* Above the scroller, so it stays put while the timeline moves under it. */}
-			{st && <MissionDiagrams state={st} />}
+			<div className="mission-split">
+				{/* ── overview: the structured, mostly-static record of what happened ── */}
+				<div className="mission-overview">
+					{st && <MissionDiagrams state={st} />}
 
-			<div className="thread">
-				{/*
-				 * The honest headline is behavioural, not "5/5".
-				 * CONTRACTS.md exists because a mission reported 6/6 and CLEAN while
-				 * none of the six executed the feature.
-				 */}
-				<div className="row" style={{ gap: 14, marginBottom: 10 }}>
-					<span>
-						<span className="label">behavioural </span>
-						<b>{behavioural ? `${behavioural.passed}/${behavioural.total}` : "—"}</b>
-					</span>
-					<span className="dim">
-						<span className="label">assertions </span>
-						{sc ? `${sc.assertionsPassed}/${sc.assertionsTotal}` : "—"}
-					</span>
-					<span className={sc?.bugs.length ? "exit-bad" : "dim"}>
-						<span className="label">bugs </span>
-						{sc?.bugs.length ?? 0}
-					</span>
-					<span className="dim">
-						<span className="label">cost </span>${(rec.costUsd ?? 0).toFixed(2)}
-					</span>
-					{st?.branch && <Ident>{st.branch}</Ident>}
+					{/*
+					 * The honest headline is behavioural, not "5/5".
+					 * CONTRACTS.md exists because a mission reported 6/6 and CLEAN while
+					 * none of the six executed the feature.
+					 */}
+					<div className="row" style={{ gap: 14, marginBottom: 10 }}>
+						<span>
+							<span className="label">behavioural </span>
+							<b>{behavioural ? `${behavioural.passed}/${behavioural.total}` : "—"}</b>
+						</span>
+						<span className="dim">
+							<span className="label">assertions </span>
+							{sc ? `${sc.assertionsPassed}/${sc.assertionsTotal}` : "—"}
+						</span>
+						<span className={sc?.bugs.length ? "exit-bad" : "dim"}>
+							<span className="label">bugs </span>
+							{sc?.bugs.length ?? 0}
+						</span>
+						<span className="dim">
+							<span className="label">cost </span>${(rec.costUsd ?? 0).toFixed(2)}
+						</span>
+						{st?.branch && <Ident>{st.branch}</Ident>}
+					</div>
+
+					{behavioural?.total === 0 && sc && sc.assertionsTotal > 0 && (
+						<div className="alert">
+							<div className="label">Nothing here executed the feature</div>
+							<p style={{ margin: "6px 0 0" }}>
+								{sc.assertionsTotal} assertion{sc.assertionsTotal === 1 ? "" : "s"} passed, none
+								behavioural. This says the code exists and reads correctly — not that it works.
+							</p>
+						</div>
+					)}
+
+					{downgraded.length > 0 && (
+						<div className="alert">
+							<div className="label">Downgraded by the classifier</div>
+							<ul>
+								{downgraded.map((c) => (
+									<li key={c.command}>
+										<span className="dim">
+											{c.declaredStrength} → {c.effectiveStrength}:
+										</span>{" "}
+										<code>{c.command.slice(0, 110)}</code>
+									</li>
+								))}
+							</ul>
+						</div>
+					)}
+
+					{sb && (
+						<div className="row" style={{ gap: 6, marginBottom: 8 }}>
+							{(["behavioural", "existence", "review", "unclassified"] as const).map((k) => {
+								const cell = sb[k];
+								if (!cell || cell.total === 0) return null;
+								return (
+									<Tag key={k} tone={STRENGTH_TONE[k]}>
+										{k} {cell.passed}/{cell.total}
+									</Tag>
+								);
+							})}
+						</div>
+					)}
+
+					{sc && sc.bugs.length > 0 && (
+						<div className="panel">
+							<div className="label">Bugs</div>
+							{sc.bugs.map((b) => (
+								<div key={`${b.file ?? ""}:${b.summary}`} style={{ marginTop: 6 }}>
+									<Tag tone={b.severity === "critical" || b.severity === "high" ? "bad" : "warn"}>
+										{b.severity}
+									</Tag>
+									{b.summary}
+									{b.file && <span className="faint"> — {b.file}{b.line ? `:${b.line}` : ""}</span>}
+								</div>
+							))}
+						</div>
+					)}
+
+					{st?.commits && st.commits.length > 0 && (
+						<>
+							<div className="msg-sep">
+								<span>commits</span>
+							</div>
+							{st.commits.map((c, i) => (
+								<div className="msg" key={c.sha ?? i}>
+									<div className="msg-when faint">{(c.sha ?? "").slice(0, 7)}</div>
+									<div className="msg-body">{c.message}</div>
+								</div>
+							))}
+						</>
+					)}
 				</div>
 
-				{behavioural?.total === 0 && sc && sc.assertionsTotal > 0 && (
-					<div className="alert">
-						<div className="label">Nothing here executed the feature</div>
-						<p style={{ margin: "6px 0 0" }}>
-							{sc.assertionsTotal} assertion{sc.assertionsTotal === 1 ? "" : "s"} passed, none
-							behavioural. This says the code exists and reads correctly — not that it works.
-						</p>
-					</div>
-				)}
+				{/* ── live: activity, the thread, and the composer ─────────────────── */}
+				<div className="mission-live-col">
+					{/* Rendered for every mission kind — screenshot, video, coding, etc. */}
+					<MissionLive id={id} initialDone={rec.done} />
 
-				{downgraded.length > 0 && (
-					<div className="alert">
-						<div className="label">Downgraded by the classifier</div>
-						<ul>
-							{downgraded.map((c) => (
-								<li key={c.command}>
-									<span className="dim">
-										{c.declaredStrength} → {c.effectiveStrength}:
-									</span>{" "}
-									<code>{c.command.slice(0, 110)}</code>
-								</li>
-							))}
-						</ul>
-					</div>
-				)}
+					{/* A client component: replies expand in place, which is the whole point of them. */}
+					<MissionThread events={events} id={id} />
 
-				{sb && (
-					<div className="row" style={{ gap: 6, marginBottom: 8 }}>
-						{(["behavioural", "existence", "review", "unclassified"] as const).map((k) => {
-							const cell = sb[k];
-							if (!cell || cell.total === 0) return null;
-							return (
-								<Tag key={k} tone={STRENGTH_TONE[k]}>
-									{k} {cell.passed}/{cell.total}
-								</Tag>
-							);
-						})}
-					</div>
-				)}
-
-				{sc && sc.bugs.length > 0 && (
-					<div className="panel">
-						<div className="label">Bugs</div>
-						{sc.bugs.map((b) => (
-							<div key={`${b.file ?? ""}:${b.summary}`} style={{ marginTop: 6 }}>
-								<Tag tone={b.severity === "critical" || b.severity === "high" ? "bad" : "warn"}>
-									{b.severity}
-								</Tag>
-								{b.summary}
-								{b.file && <span className="faint"> — {b.file}{b.line ? `:${b.line}` : ""}</span>}
-							</div>
-						))}
-					</div>
-				)}
-
-						{/* ── live activity indicator + recent-activity feed ──────────── */}
-				{/* Rendered for every mission kind — screenshot, video, coding, etc. */}
-				<MissionLive id={id} initialDone={rec.done} />
-
-				{/* ── the thread proper ─────────────────────────────────────────── */}
-				{/* A client component: replies expand in place, which is the whole point of them. */}
-				<MissionThread events={events} id={id} />
-
-				{st?.commits && st.commits.length > 0 && (
-					<>
-						<div className="msg-sep">
-							<span>commits</span>
-						</div>
-						{st.commits.map((c, i) => (
-							<div className="msg" key={c.sha ?? i}>
-								<div className="msg-when faint">{(c.sha ?? "").slice(0, 7)}</div>
-								<div className="msg-body">{c.message}</div>
-							</div>
-						))}
-					</>
-				)}
-
-				{/* Questions land here, answered here — see mission-chat.tsx. */}
-				<MissionChat
-					id={rec.id}
-					name={rec.name}
-					done={rec.done}
-					cleared={Boolean(rec.cleared)}
-					canMutate={mayMutate(op)}
-				/>
+					{/* Questions land here, answered here — see mission-chat.tsx. */}
+					<MissionChat
+						id={rec.id}
+						name={rec.name}
+						done={rec.done}
+						cleared={Boolean(rec.cleared)}
+						canMutate={mayMutate(op)}
+					/>
+				</div>
 			</div>
 		</Shell>
 	);
