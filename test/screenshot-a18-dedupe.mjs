@@ -127,7 +127,8 @@ const TARGET_URL = "data:text/html,<html><body style='background:%23eee'><h1>a18
 }
 
 // ---------------------------------------------------------------------------
-// Test 5: ctx callback receives correct argument order: (mimeType, buffer)
+// Test 5: ctx callback receives correct argument order: (data, mimeType)
+// Both ctx and opts now use the same unified (data: Buffer, mimeType: string) signature.
 // ---------------------------------------------------------------------------
 {
   let receivedArgs;
@@ -135,21 +136,21 @@ const TARGET_URL = "data:text/html,<html><body style='background:%23eee'><h1>a18
   const tool = createScreenshotTool({});
 
   await tool.run({ url: TARGET_URL, width: 320, height: 240 }, {
-    attachImage: (mimeType, data) => {
-      receivedArgs = { mimeType, data };
+    attachImage: (data, mimeType) => {
+      receivedArgs = { data, mimeType };
     },
   });
 
-  if (typeof receivedArgs?.mimeType === "string" && receivedArgs.mimeType.startsWith("image/")) {
-    ok("Test 5: ctx.attachImage first arg is mimeType string");
+  if (Buffer.isBuffer(receivedArgs?.data) && receivedArgs.data.length > 0) {
+    ok("Test 5: ctx.attachImage first arg is a non-empty Buffer (unified data-first signature)");
   } else {
-    fail(`Test 5: ctx.attachImage first arg is not a mimeType string: ${JSON.stringify(receivedArgs?.mimeType)}`);
+    fail(`Test 5: ctx.attachImage first arg is not a Buffer: ${typeof receivedArgs?.data}`);
   }
 
-  if (Buffer.isBuffer(receivedArgs?.data) && receivedArgs.data.length > 0) {
-    ok("Test 5: ctx.attachImage second arg is a non-empty Buffer");
+  if (typeof receivedArgs?.mimeType === "string" && receivedArgs.mimeType.startsWith("image/")) {
+    ok("Test 5: ctx.attachImage second arg is mimeType string (unified data-first signature)");
   } else {
-    fail(`Test 5: ctx.attachImage second arg is not a Buffer: ${typeof receivedArgs?.data}`);
+    fail(`Test 5: ctx.attachImage second arg is not a mimeType string: ${JSON.stringify(receivedArgs?.mimeType)}`);
   }
 }
 

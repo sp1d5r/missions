@@ -32,6 +32,14 @@ export function getBrowserInstanceCountForTest(): number {
 }
 
 /**
+ * Returns the current browser reference count.
+ * Exposed for testing (a25) to verify the ref-count is not stomped by closeBrowser().
+ */
+export function getBrowserRefCountForTest(): number {
+	return browserRefCount;
+}
+
+/**
  * Increment the browser reference count.
  * Call this when a worker starts so the browser is not torn down while
  * sibling workers are still using it.
@@ -81,8 +89,10 @@ export async function closeBrowser(): Promise<void> {
 	const b = browser;
 	browser = undefined;
 	browserPromise = undefined;
-	// Also reset the ref count so a subsequent acquireBrowserRef() starts clean.
-	browserRefCount = 0;
+	// Do NOT reset browserRefCount here — doing so would stomp the ref count
+	// of concurrent workers that are still in-flight. The ref count is managed
+	// exclusively by acquireBrowserRef / releaseBrowserRef. closeBrowser() is
+	// a force-close (for explicit teardown), not a ref-count reset.
 	try {
 		await b?.close();
 	} catch {
@@ -185,13 +195,14 @@ export interface ScreenshotResult {
  */
 export interface ScreenshotExecuteContext {
 	/**
-	 * Called after each screenshot with (mimeType, buffer).
-	 * Note: when using the factory opts `attachImage`, the order is (buffer, mimeType).
-	 * The context-based signature matches the worker store interface: (mimeType, buffer).
+	 * Called after each screenshot with (data, mimeType) — data (Buffer) first,
+	 * mimeType (string) second. This matches the worker store interface:
+	 * StateStore.attachImage(data: Buffer, mimeType: string).
+	 * Both the ctx and opts signatures use the same order to prevent confusion.
 	 */
-	attachImage?: (mimeType: string, data: Buffer) => Promise<unknown> | unknown;
+	attachImage?: (data: Buffer, mimeType: string) => Promise<unknown> | unknown;
 	store?: {
-		attachImage?: (mimeType: string, data: Buffer) => Promise<unknown> | unknown;
+		attachImage?: (data: Buffer, mimeType: string) => Promise<unknown> | unknown;
 	};
 	/** Ignored – present only for compatibility with the worker context shape. */
 	missionId?: string;
@@ -265,7 +276,7 @@ export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentToo
 			paramsOrCtx?: ScreenshotParams | ScreenshotExecuteContext,
 		): Promise<ScreenshotResult> {
 			let params: ScreenshotParams;
-			let ctxAttachImage: ((mimeType: string, data: Buffer) => Promise<unknown> | unknown) | undefined;
+			let ctxAttachImage: ((data: Buffer, mimeType: string) => Promise<unknown> | unknown) | undefined;
 
 			if (typeof toolCallIdOrParams === "string") {
 				// Agent pipeline call: execute(toolCallId, params)
@@ -327,15 +338,17 @@ export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentToo
  * attachImage deduplication: if ctx provides an attachImage callback, only that
  * one is called. The opts-level callback is only called when no ctx callback is
  * present. This prevents the same image being stored/transmitted twice.
+ *
+ * Both ctxAttachImage and optsAttachImage use the same signature: (data, mimeType).
  */
 async function captureScreenshot(
 	params: ScreenshotParams,
 	defaultWidth: number,
 	defaultHeight: number,
-	/** Factory-level callback: called as (buffer, mimeType). Only used when no ctx callback. */
+	/** Factory-level callback: called as (data, mimeType). Only used when no ctx callback. */
 	optsAttachImage?: ScreenshotToolOptions["attachImage"],
-	/** Context-level callback: called as (mimeType, buffer). Takes priority over opts callback. */
-	ctxAttachImage?: (mimeType: string, data: Buffer) => Promise<unknown> | unknown,
+	/** Context-level callback: called as (data, mimeType). Takes priority over opts callback. */
+	ctxAttachImage?: (data: Buffer, mimeType: string) => Promise<unknown> | unknown,
 ): Promise<ScreenshotResult> {
 	const { url, selector, fullPage = false } = params;
 	const width = params.width ?? defaultWidth;
@@ -365,8 +378,9 @@ async function captureScreenshot(
 		//   - If a context-level callback is provided, use it (ctx wins).
 		//   - Otherwise fall back to the factory opts callback.
 		// This prevents the same image being attached twice when both are present.
+		// Both callbacks use the same (data: Buffer, mimeType: string) signature.
 		if (ctxAttachImage) {
-			await ctxAttachImage("image/png", pngBuffer);
+			await ctxAttachImage(pngBuffer, "image/png");
 		} else if (optsAttachImage) {
 			await optsAttachImage(pngBuffer, "image/png");
 		}
