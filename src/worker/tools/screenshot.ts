@@ -20,6 +20,9 @@ let browser: Browser | undefined;
 let browserPromise: Promise<Browser> | undefined;
 let browserLaunchCount = 0;
 
+/** Reference count for concurrent workers sharing the browser singleton. */
+let browserRefCount = 0;
+
 /**
  * Returns how many times the browser was launched in this process.
  * Exposed for testing (a21) to verify browser singleton reuse.
@@ -28,7 +31,35 @@ export function getBrowserInstanceCountForTest(): number {
 	return browserLaunchCount;
 }
 
+/**
+ * Increment the browser reference count.
+ * Call this when a worker starts so the browser is not torn down while
+ * sibling workers are still using it.
+ *
+ * Pair each acquireBrowserRef() with a releaseBrowserRef() in a finally block.
+ */
+export function acquireBrowserRef(): void {
+	browserRefCount++;
+}
 
+/**
+ * Decrement the browser reference count and close the browser when it reaches 0.
+ *
+ * This is the concurrent-safe replacement for unconditionally calling
+ * closeBrowser() in every worker's finally block. When multiple workers run in
+ * parallel they share the same browser singleton; only the last one to finish
+ * actually closes the browser.
+ *
+ * @returns A promise that resolves once the browser has been closed (if this
+ *          was the last reference) or immediately (if other workers are still
+ *          running).
+ */
+export async function releaseBrowserRef(): Promise<void> {
+	browserRefCount = Math.max(0, browserRefCount - 1);
+	if (browserRefCount === 0) {
+		await closeBrowser();
+	}
+}
 
 /**
  * Close the browser, resetting the singleton state so the next call to
@@ -41,11 +72,17 @@ export function getBrowserInstanceCountForTest(): number {
  * Call this once the process no longer needs the browser (e.g. from
  * runWorker's finally block). The Node.js event loop will drain naturally
  * once the browser process is closed.
+ *
+ * Note: prefer releaseBrowserRef() in runWorker to correctly handle concurrent
+ * workers. Use closeBrowser() only when you want to force-close regardless of
+ * how many workers are active.
  */
 export async function closeBrowser(): Promise<void> {
 	const b = browser;
 	browser = undefined;
 	browserPromise = undefined;
+	// Also reset the ref count so a subsequent acquireBrowserRef() starts clean.
+	browserRefCount = 0;
 	try {
 		await b?.close();
 	} catch {

@@ -3,14 +3,14 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { type AgentSpec, createDelegateTool } from "./subagent.js";
 import { Agent, getEnvApiKey, getModel, streamFn, type AgentEvent, type AgentMessage, type AssistantMessage } from "./pi.js";
-import { createScreenshotTool, closeBrowser, type ScreenshotToolOptions, type ScreenshotParams, type ScreenshotResult } from "./worker/tools/screenshot.js";
+import { createScreenshotTool, closeBrowser, acquireBrowserRef, releaseBrowserRef, type ScreenshotToolOptions, type ScreenshotParams, type ScreenshotResult } from "./worker/tools/screenshot.js";
 import { parseJson } from "./llm.js";
 import { registerWorker } from "./workers.js";
 import type { AgentTool } from "./pi.js";
 import type { Assertion, CommandRecord, Feature, Handoff, HandoffIssue, ModelSpec } from "./types.js";
 
 // Re-export screenshot tool factory and browser lifecycle helpers so callers can import them from worker.ts
-export { createScreenshotTool, closeBrowser };
+export { createScreenshotTool, closeBrowser, acquireBrowserRef, releaseBrowserRef };
 export type { ScreenshotToolOptions, ScreenshotParams, ScreenshotResult };
 
 const SYSTEM_PROMPT = `You are a CODING WORKER in an autonomous engineering org.
@@ -263,16 +263,19 @@ Make the change now, then emit your handoff block.`;
 	});
 	const unregister = registerWorker({ info, agent, recent });
 
+	// Increment the browser reference count before the worker starts so a
+	// sibling worker finishing concurrently does not close the browser while
+	// this one is still running.
+	acquireBrowserRef();
 	try {
 		await agent.prompt(task);
 	} catch (err) {
 		errorMessage = err instanceof Error ? err.message : String(err);
 	} finally {
-		// Release the Playwright browser singleton so its child-process handles
-		// do not keep the Node.js event loop alive after the worker finishes.
-		// closeBrowser() is idempotent and safe to call even if the screenshot
-		// tool was never used.
-		await closeBrowser();
+		// Decrement the reference count; the browser is only closed when the
+		// last concurrent worker finishes. This prevents a race where a
+		// sibling worker's closeBrowser() tears down the singleton mid-capture.
+		await releaseBrowserRef();
 	}
 	await agent.waitForIdle();
 	// NOT unregistered here. This used to drop the worker the instant its turn ended — before
