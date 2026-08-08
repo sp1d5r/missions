@@ -481,8 +481,11 @@ textarea { resize: vertical; min-height: 76px; }
 .diagrams[open] > summary::before { transform: rotate(90deg); }
 .diagrams > summary:hover .label { color: var(--text); }
 .diagrams > summary:focus-visible { outline: 1px solid var(--live); outline-offset: 2px; }
-/* Bounded so the panel can never eat the page, and scrolls inside itself. */
-.diagrams-body { max-height: 52vh; overflow-y: auto; padding-bottom: 10px; }
+/* No max-height/overflow here on purpose: this used to scroll independently of the rest of
+   .mission-overview (stats, bugs, commits below it), which read as two separate scrollable
+   windows stacked on top of each other. The whole left column is one scroller now — see
+   .mission-overview — so this just flows as part of it. */
+.diagrams-body { padding-bottom: 10px; }
 
 /* A diagram inline is sized to fit half the page (see .mission-overview); clicking it opens a
    full-screen copy instead of forcing a squint at seven milestones packed into a half-width
