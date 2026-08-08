@@ -2,19 +2,16 @@
 /**
  * a17 — SIGINT/SIGTERM listener-count test.
  *
- * Asserts: the SIGINT and SIGTERM handlers are registered exactly once at
- * module load time (not once per getBrowser() call or per tool instance),
- * so that importing the screenshot module does not accumulate duplicate signal
- * listeners across multiple imports or tool invocations.
+ * Asserts: importing the screenshot module does NOT register any SIGINT or
+ * SIGTERM listeners at module load time (the module no longer installs
+ * module-scope signal handlers). Signal handling is left to Playwright's own
+ * cleanup plus the exported closeBrowser() that callers invoke on shutdown.
  *
  * Strategy:
  *   1. Record the SIGINT/SIGTERM listener counts before importing the module.
- *   2. Import the module (which registers exactly one handler per signal at
- *      module top-level using process.once()).
- *   3. Assert the counts increased by exactly 1 each.
- *   4. Import again (should be a no-op due to ESM module caching).
- *   5. Assert the counts did NOT increase further.
- *   6. Create multiple tool instances — listener count must stay the same.
+ *   2. Import the module — counts must NOT change.
+ *   3. Import again (ESM cache) — counts still must not change.
+ *   4. Create multiple tool instances — listener count must stay the same.
  *
  * Exit 0 on success, 1 on failure.
  */
@@ -45,7 +42,7 @@ const sigtermBefore = process.listenerCount("SIGTERM");
 console.log(`Before import: SIGINT listeners = ${sigintBefore}, SIGTERM listeners = ${sigtermBefore}`);
 
 // ---------------------------------------------------------------------------
-// First import — should register exactly one listener per signal
+// First import — must NOT register any signal listeners
 // ---------------------------------------------------------------------------
 const screenshotModule = await import(join(repoRoot, "dist/worker/tools/screenshot.js"));
 
@@ -54,20 +51,20 @@ const sigtermAfterFirst = process.listenerCount("SIGTERM");
 
 console.log(`After 1st import: SIGINT listeners = ${sigintAfterFirst}, SIGTERM listeners = ${sigtermAfterFirst}`);
 
-if (sigintAfterFirst === sigintBefore + 1) {
-  ok("SIGINT listener count increased by exactly 1 after first import");
+if (sigintAfterFirst === sigintBefore) {
+  ok("SIGINT listener count did not change after first import (no module-scope handler)");
 } else {
-  fail(`SIGINT listener count changed by ${sigintAfterFirst - sigintBefore}, expected 1 (before=${sigintBefore}, after=${sigintAfterFirst})`);
+  fail(`SIGINT listener count changed by ${sigintAfterFirst - sigintBefore}, expected 0 (before=${sigintBefore}, after=${sigintAfterFirst})`);
 }
 
-if (sigtermAfterFirst === sigtermBefore + 1) {
-  ok("SIGTERM listener count increased by exactly 1 after first import");
+if (sigtermAfterFirst === sigtermBefore) {
+  ok("SIGTERM listener count did not change after first import (no module-scope handler)");
 } else {
-  fail(`SIGTERM listener count changed by ${sigtermAfterFirst - sigtermBefore}, expected 1 (before=${sigtermBefore}, after=${sigtermAfterFirst})`);
+  fail(`SIGTERM listener count changed by ${sigtermAfterFirst - sigtermBefore}, expected 0 (before=${sigtermBefore}, after=${sigtermAfterFirst})`);
 }
 
 // ---------------------------------------------------------------------------
-// Second import (ESM cache) — must NOT add more listeners
+// Second import (ESM cache) — must NOT add any listeners
 // ---------------------------------------------------------------------------
 await import(join(repoRoot, "dist/worker/tools/screenshot.js"));
 
@@ -76,20 +73,20 @@ const sigtermAfterSecond = process.listenerCount("SIGTERM");
 
 console.log(`After 2nd import: SIGINT listeners = ${sigintAfterSecond}, SIGTERM listeners = ${sigtermAfterSecond}`);
 
-if (sigintAfterSecond === sigintAfterFirst) {
-  ok("SIGINT listener count did not increase on second import (ESM cache, registered once)");
+if (sigintAfterSecond === sigintBefore) {
+  ok("SIGINT listener count did not change on second import (no module-scope handler)");
 } else {
-  fail(`SIGINT listener count increased from ${sigintAfterFirst} to ${sigintAfterSecond} on second import — handler registered multiple times`);
+  fail(`SIGINT listener count changed from ${sigintBefore} to ${sigintAfterSecond} on second import — unexpected handler registered`);
 }
 
-if (sigtermAfterSecond === sigtermAfterFirst) {
-  ok("SIGTERM listener count did not increase on second import (ESM cache, registered once)");
+if (sigtermAfterSecond === sigtermBefore) {
+  ok("SIGTERM listener count did not change on second import (no module-scope handler)");
 } else {
-  fail(`SIGTERM listener count increased from ${sigtermAfterFirst} to ${sigtermAfterSecond} on second import — handler registered multiple times`);
+  fail(`SIGTERM listener count changed from ${sigtermBefore} to ${sigtermAfterSecond} on second import — unexpected handler registered`);
 }
 
 // ---------------------------------------------------------------------------
-// Create multiple tool instances — listener count must not increase further
+// Create multiple tool instances — listener count must not increase
 // ---------------------------------------------------------------------------
 const { createScreenshotTool } = screenshotModule;
 

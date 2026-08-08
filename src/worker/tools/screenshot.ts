@@ -20,25 +20,19 @@ let browser: Browser | undefined;
 let browserPromise: Promise<Browser> | undefined;
 
 /**
- * Handles (Sockets, Servers, etc.) added to the Node.js event loop by the
- * browser launch. We track them so we can unref them after each capture
- * (allowing the process to exit naturally when the caller is done) and ref
- * them again before the next capture (ensuring I/O completes correctly).
+ * The browser child process obtained after launch. Unref-ing it lets the
+ * Node.js event loop exit naturally when no other work is pending.
  */
-let browserHandles: Array<{ ref?: () => void; unref?: () => void }> = [];
+let browserChildProcess: { ref?: () => void; unref?: () => void } | undefined;
 
-/** Ref all browser handles so the event loop stays alive during I/O. */
+/** Ref the browser child process so the event loop stays alive during I/O. */
 function refBrowserHandles(): void {
-	for (const h of browserHandles) {
-		try { h.ref?.(); } catch { /* ignore */ }
-	}
+	try { browserChildProcess?.ref?.(); } catch { /* ignore */ }
 }
 
-/** Unref all browser handles so they do not keep the process alive when idle. */
+/** Unref the browser child process so it does not keep the process alive when idle. */
 function unrefBrowserHandles(): void {
-	for (const h of browserHandles) {
-		try { h.unref?.(); } catch { /* ignore */ }
-	}
+	try { browserChildProcess?.unref?.(); } catch { /* ignore */ }
 }
 
 /**
@@ -53,33 +47,13 @@ export async function closeBrowser(): Promise<void> {
 	const b = browser;
 	browser = undefined;
 	browserPromise = undefined;
-	browserHandles = [];
+	browserChildProcess = undefined;
 	try {
 		await b?.close();
 	} catch {
 		// ignore
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Module-level SIGINT/SIGTERM handler — registered exactly once at import.
-//
-// Calls closeBrowser() if a browser is active, then re-raises the signal so
-// the process exits with the correct signal-based exit code. Using
-// process.once() here (at module load time) ensures we never accumulate more
-// than one listener per signal regardless of how many times getBrowser() is
-// called or how many tool instances are created.
-//
-// Signal handlers do NOT keep the event loop alive, so registering them at
-// module load does not block process exit.
-// ---------------------------------------------------------------------------
-const handleShutdownSignal = async (signal: string): Promise<void> => {
-	await closeBrowser();
-	process.kill(process.pid, signal);
-};
-
-process.once("SIGINT", () => void handleShutdownSignal("SIGINT"));
-process.once("SIGTERM", () => void handleShutdownSignal("SIGTERM"));
 
 /**
  * Return the shared browser instance, launching it once on first call.
@@ -88,10 +62,16 @@ process.once("SIGTERM", () => void handleShutdownSignal("SIGTERM"));
  * there are no WebSocket server/client handles to track — only the CDP pipes
  * and the browser child process.
  *
- * After launch, all new event-loop handles created by the browser are
- * immediately unref()ed so that the Node.js process can exit naturally after
- * the last capture completes. Inside captureScreenshot(), the handles are
- * temporarily ref()ed for the duration of the I/O and then unref()ed again.
+ * After launch, the browser child process is obtained via Playwright's internal
+ * browserImpl.options.browserProcess.process and immediately unref()ed so that
+ * the Node.js process can exit naturally after the last capture completes.
+ * Inside captureScreenshot(), the child process is temporarily ref()ed for the
+ * duration of the I/O and then unref()ed again.
+ *
+ * No module-scope signal handlers are registered. Callers are responsible for
+ * calling closeBrowser() during their own shutdown paths (e.g. via the exported
+ * close() on the tool, or a worker/CLI teardown sequence). Playwright installs
+ * its own SIGINT handler on first browser launch.
  *
  * On rejection, browserPromise is cleared so a retry will re-launch.
  */
@@ -103,23 +83,39 @@ async function getBrowser(): Promise<Browser> {
 		// Dynamic import so the module loads even when playwright is not installed.
 		const { chromium } = await import("playwright");
 
-		// Snapshot handles before launch so we can identify the new ones.
-		const handlesBefore: unknown[] = (process as NodeJS.Process & { _getActiveHandles?: () => unknown[] })
-			._getActiveHandles?.() ?? [];
-
 		const b = await chromium.launch({ headless: true });
 		browser = b;
 
-		// Track handles added by the browser launch and immediately unref them.
-		// The handles remain functional — they will be re-ref()ed during captures.
-		const handlesAfter: Array<{ ref?: () => void; unref?: () => void }> =
-			((process as NodeJS.Process & { _getActiveHandles?: () => unknown[] })
-				._getActiveHandles?.() ?? []) as Array<{ ref?: () => void; unref?: () => void }>;
-
-		browserHandles = handlesAfter.filter(
-			(h) => !(handlesBefore as unknown[]).includes(h),
-		);
-		unrefBrowserHandles();
+		// Obtain the browser child process via Playwright's internal API and
+		// immediately unref it so Node.js can exit naturally when idle.
+		// Wrapped in try/catch: if Playwright changes its internal structure,
+		// this degrades gracefully instead of throwing.
+		try {
+			type BrowserImpl = {
+				options?: {
+					browserProcess?: {
+						process?: { ref?: () => void; unref?: () => void } | null;
+					};
+				};
+			};
+			type ConnectionLike = {
+				_localUtils?: {
+					_connection?: {
+						toImpl?: (b: Browser) => BrowserImpl;
+					};
+				};
+			};
+			const conn = (b as unknown as { _connection?: ConnectionLike })._connection;
+			const impl = conn?._localUtils?._connection?.toImpl?.(b);
+			const childProc = impl?.options?.browserProcess?.process;
+			if (childProc && typeof childProc.unref === "function") {
+				browserChildProcess = childProc;
+				childProc.unref();
+			}
+		} catch {
+			// Playwright internal structure changed — continue without unref.
+			// The process will still exit correctly once closeBrowser() is called.
+		}
 
 		return b;
 	};
