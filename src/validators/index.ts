@@ -74,7 +74,7 @@ export async function runValidators(options: RunValidatorsOptions): Promise<Scor
 	// 2. Extra scrutiny command (repo test/typecheck), if provided.
 	if (extraCheckCommand) {
 		onProgress?.(`check: ${extraCheckCommand}`);
-		checks.push(runCheck({ cwd, command: extraCheckCommand, env, foreignRoot }));
+		checks.push(await runCheck({ cwd, command: extraCheckCommand, env, foreignRoot }));
 	}
 
 	// 3. Per-assertion validation.
@@ -91,7 +91,7 @@ export async function runValidators(options: RunValidatorsOptions): Promise<Scor
 		a.pending = undefined;
 		if (a.method.type === "bash-command") {
 			onProgress?.(`assert ${a.id}: ${a.method.command}`);
-			const r = runCheck({
+			const r = await runCheck({
 				cwd,
 				command: a.method.command,
 				expectedExitCode: a.method.expectedExitCode,

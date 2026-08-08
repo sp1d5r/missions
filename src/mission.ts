@@ -9,6 +9,8 @@ import { blocking, checkBoundary, checkContractRatchet, checkPlan, formatViolati
 import { decideStallOrRetry } from "./stall.js";
 import { humanBytes, reclaimWorktree } from "./lifecycle.js";
 import { type CorrectionRuling, planMission, scopeCorrections } from "./orchestrator.js";
+import { acquireMissionLock } from "./mission-lock.js";
+import { dispatchOverseerCheckIn } from "./overseer.js";
 import { readActive, writeActive, repoName } from "./registry.js";
 import { generateReport } from "./report.js";
 import { StateStore } from "./state.js";
@@ -150,6 +152,13 @@ async function runMilestoneLoop(ctx: MilestoneLoopContext): Promise<{ verdict: M
 	let queue: Feature[] = ctx.initialQueue;
 	let scoreCard: ScoreCard | undefined;
 	let verdict: MilestoneVerdict = "stalled";
+	// Tracks whether THIS iteration's boundaryLoop actually stalled the milestone on a boundary
+	// violation. `verdict` can't be used for that check below: it's declared once per function
+	// call and starts at "stalled" as a lazy default, so on a clean boundary pass (no violations —
+	// the common case) it still reads "stalled" from before the loop ever ran, and the milestone's
+	// real terminal outcome (passed / corrections-scoped / no-corrections stall) below never
+	// executes — silently discarding the milestone's work and its record every time.
+	let boundaryStalled = false;
 
 	for (let m = store.state.milestones.length + 1; m <= ctx.maxMilestones; m++) {
 		if (!queue.length) {
@@ -433,6 +442,7 @@ async function runMilestoneLoop(ctx: MilestoneLoopContext): Promise<{ verdict: M
 					failing.map((a) => a.id),
 				);
 				verdict = "stalled";
+				boundaryStalled = true;
 				record.verdict = verdict;
 				record.assessment = `${review.assessment}\n\n[harness] Boundary blocked by ${blockers.length} invariant violation(s):\n${formatViolations(blockers)}`;
 				store.state.milestones.push(record);
@@ -446,7 +456,7 @@ async function runMilestoneLoop(ctx: MilestoneLoopContext): Promise<{ verdict: M
 			break boundaryLoop;
 		} // end boundaryLoop
 
-		if (verdict === "stalled") break;
+		if (boundaryStalled) break;
 
 		const stillOpen = handoffs.flatMap((h) => h.issues.filter((i) => !i.disposition));
 
@@ -789,6 +799,10 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 			emit(`stall reason: ${store.state.stallReason}`);
 		}
 		store.appendEvent("lifecycle", finalMsg, store.state.stallReason, { seat: "system" });
+		// A stall is a human-shaped pause, not a dead end — hand it straight to the mission's own
+		// overseer instead of leaving it sitting until someone happens to check in. One check-in
+		// per stall, not a standing process: see dispatchOverseerCheckIn's own doc comment.
+		if (verdict === "stalled") dispatchOverseerCheckIn(config.outDir);
 	} catch (err) {
 		const errMsg = `FAILED: ${err instanceof Error ? err.message : String(err)}`;
 		emit(errMsg);
@@ -895,6 +909,12 @@ export async function resumeMission(
 	if (!decision.ok) {
 		throw new Error(`Cannot resume: ${decision.reason}. ${decision.remedy}`);
 	}
+
+	// Refuse a second concurrent resume on the same outDir outright instead of racing it: two
+	// resumeMission() calls each hold their own in-memory StateStore snapshot, and whichever
+	// calls store.save() last silently wins, discarding the other's milestone record. See
+	// mission-lock.ts for the full story.
+	const releaseLock = acquireMissionLock(outDir);
 
 	// We have a valid, loadable state.
 	const store = storeOrNull!;
@@ -1174,6 +1194,10 @@ export async function resumeMission(
 			outDir,
 		});
 		store.appendEvent("lifecycle", finalMsg, store.state.stallReason, { seat: "system" });
+		// Same hand-off as runMission's terminal stall — see dispatchOverseerCheckIn's doc comment
+		// for why this is safe to chain (self-terminates at the budget/milestone ceiling) without
+		// being a standing process.
+		if (finalVerdict === "stalled") dispatchOverseerCheckIn(outDir);
 	} catch (err) {
 		const errMsg = `RESUME FAILED: ${err instanceof Error ? err.message : String(err)}`;
 		emit(errMsg);
@@ -1194,6 +1218,7 @@ export async function resumeMission(
 		}
 	} finally {
 		stopServing();
+		releaseLock();
 	}
 
 	return store.state;

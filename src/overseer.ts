@@ -10,7 +10,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
-import { createReadOnlyTools } from "@earendil-works/pi-coding-agent";
+import { createEditTool, createReadOnlyTools, createWriteTool } from "@earendil-works/pi-coding-agent";
 import { createBoundedBashTool } from "./bounded-bash.js";
 import { join } from "node:path";
 import { basename } from "node:path";
@@ -366,15 +366,23 @@ export function createOverseerSession(outDir: string, options: OverseerOptions =
 	};
 
 	/**
-	 * Read and run, in the worktree if it is still there and the target repo once it is not.
+	 * Read, run, and edit — in the worktree if it is still there and the target repo once it is not.
 	 *
 	 * Returns nothing at all only when neither path exists, which means there is genuinely no
 	 * tree to look at — better to have no tool than one pointed at a directory that is gone.
+	 *
+	 * Given write access deliberately: a large share of real stalls turn out to be a broken
+	 * assertion (references a nonexistent API, an unset env var, a `cd` into a path that does
+	 * not exist inside a worktree, scans stale/nondeterministic state) rather than a bug in the
+	 * mission's own code. The contract ratchet (checkContractRatchet) still blocks the
+	 * ORCHESTRATOR from rewording/re-methoding/deleting an assertion across milestones — that
+	 * guard is unrelated to this and still stands. This is a human-equivalent one-time repair
+	 * before a resume, the same class of action a person would take by hand in state.json.
 	 */
 	function repoTools(worktreePath: string | undefined, targetCwd: string) {
 		const cwd = worktreePath && existsSync(worktreePath) ? worktreePath : targetCwd;
 		if (!cwd || !existsSync(cwd)) return [];
-		return [...createReadOnlyTools(cwd), createBoundedBashTool(cwd)];
+		return [...createReadOnlyTools(cwd), createBoundedBashTool(cwd), createWriteTool(cwd), createEditTool(cwd)];
 	}
 
 	const agent = new Agent({
@@ -558,4 +566,62 @@ export function createOverseerSession(outDir: string, options: OverseerOptions =
 			listeners.clear();
 		},
 	};
+}
+
+// ---------------------------------------------------------------------------
+// Auto check-in on stall
+// ---------------------------------------------------------------------------
+
+/**
+ * The prompt a mission's own stall hands to its overseer. Mirrors what a human operator was
+ * doing by hand: distinguish a broken assertion (fixable in state.json) from a real unfinished
+ * bug (leave it, let the worker earn another correction round), then resume if there is
+ * anything worth another pass on.
+ */
+const CHECK_IN_PROMPT = `This mission just stalled. Check mission_status first.
+
+For each failing assertion, run its method.command by hand via bash (cwd is already this mission's worktree) to see whether it actually passes when run directly.
+- If it passes by hand but fails in the recorded validator result, the assertion itself is very likely structurally broken (wrong cwd assumption, references a nonexistent API/module, an unset env var, or scans stale/nondeterministic state). In that case, use your write/edit tool to fix ONLY that assertion's method.command field directly in this mission's own state.json (plan.contract.assertions[].method.command) — do not touch anything else in state.json, and never touch the worktree's own source files. Re-verify your fixed command passes by hand before moving on.
+- If it genuinely fails by hand too, that is real unfinished work for the worker — leave it alone. Do not hand-patch the target repo yourself; the point is to see whether the mission's own workers can close the gap, not to close it for them.
+- If a live worker appears to be repeating already-finished work instead of addressing the real remaining gap, use ask_worker to find out why before steer_worker — an unnecessary steer costs a turn and breaks its train of thought.
+
+Once you've checked every failing assertion, call resume_mission if there is anything worth another pass on (a fix you made, or real work still open with budget/milestones remaining). Keep your final report to a few sentences — what you found, what if anything you fixed, whether you resumed.`;
+
+/**
+ * Fire off exactly one overseer check-in for a mission that just stalled, without waiting for
+ * it or holding up the caller.
+ *
+ * Deliberately NOT a keep-alive loop: this dispatches once per stall, the overseer runs one
+ * turn (read, diagnose, maybe fix a broken assertion, maybe resume_mission), and the session
+ * ends. If that resume produces another stall, THAT stall's own finalization calls this again —
+ * so the chain is self-perpetuating without anything staying resident, and self-terminating
+ * once the mission's budget or milestone ceiling is hit (those produce a verdict other than
+ * "stalled", which this is never called for).
+ *
+ * Failures here are swallowed rather than thrown: a mission that just finished stalling must
+ * not fail its own return because the follow-up check-in couldn't start.
+ */
+export function dispatchOverseerCheckIn(outDir: string): void {
+	void (async () => {
+		try {
+			const session = createOverseerSession(outDir);
+			if (!session) return;
+			// ask() (not input()) because it's actually awaitable: it awaits the full turn and
+			// resolves with the overseer's final answer. input() is fire-and-forget for a live
+			// terminal, with no completion signal of its own — an earlier version of this function
+			// polled chat.jsonl's length instead, but a mid-turn tool (resume_mission's own
+			// fire-and-forget "[resume-complete]" append) writes to that same file *before* the
+			// overseer's real final reply does, so the poll resolved early and close()'s
+			// agent.abort() cut the turn off mid-sentence, every time. ask() has no such race:
+			// it doesn't return until the turn is genuinely done.
+			await Promise.race([
+				session.ask(CHECK_IN_PROMPT),
+				// Belt and braces: never hang the process on a turn that never completes.
+				new Promise<void>((resolve) => setTimeout(resolve, 10 * 60 * 1000)),
+			]);
+			session.close();
+		} catch {
+			/* a failed check-in leaves the mission exactly as stalled as it already was */
+		}
+	})();
 }
