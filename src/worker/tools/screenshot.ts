@@ -19,21 +19,7 @@ import { Type, type AgentTool } from "../../pi.js";
 let browser: Browser | undefined;
 let browserPromise: Promise<Browser> | undefined;
 
-/**
- * The browser child process obtained after launch. Unref-ing it lets the
- * Node.js event loop exit naturally when no other work is pending.
- */
-let browserChildProcess: { ref?: () => void; unref?: () => void } | undefined;
 
-/** Ref the browser child process so the event loop stays alive during I/O. */
-function refBrowserHandles(): void {
-	try { browserChildProcess?.ref?.(); } catch { /* ignore */ }
-}
-
-/** Unref the browser child process so it does not keep the process alive when idle. */
-function unrefBrowserHandles(): void {
-	try { browserChildProcess?.unref?.(); } catch { /* ignore */ }
-}
 
 /**
  * Close the browser, resetting the singleton state so the next call to
@@ -42,12 +28,15 @@ function unrefBrowserHandles(): void {
  * Exported so callers (tests, validators, end-to-end scripts) can explicitly
  * release browser resources after their last capture, allowing the Node.js
  * event loop to drain without process.exit().
+ *
+ * This is also called automatically at the end of every captureScreenshot()
+ * invocation so the Playwright child-process handles are released after each
+ * capture and the Node.js event loop is free to drain.
  */
 export async function closeBrowser(): Promise<void> {
 	const b = browser;
 	browser = undefined;
 	browserPromise = undefined;
-	browserChildProcess = undefined;
 	try {
 		await b?.close();
 	} catch {
@@ -62,16 +51,12 @@ export async function closeBrowser(): Promise<void> {
  * there are no WebSocket server/client handles to track — only the CDP pipes
  * and the browser child process.
  *
- * After launch, the browser child process is obtained via Playwright's internal
- * browserImpl.options.browserProcess.process and immediately unref()ed so that
- * the Node.js process can exit naturally after the last capture completes.
- * Inside captureScreenshot(), the child process is temporarily ref()ed for the
- * duration of the I/O and then unref()ed again.
- *
  * No module-scope signal handlers are registered. Callers are responsible for
  * calling closeBrowser() during their own shutdown paths (e.g. via the exported
- * close() on the tool, or a worker/CLI teardown sequence). Playwright installs
- * its own SIGINT handler on first browser launch.
+ * close() on the tool, or a worker/CLI teardown sequence). The browser is also
+ * closed automatically at the end of every captureScreenshot() call so that
+ * Playwright child-process handles are released and the Node.js event loop can
+ * drain without process.exit().
  *
  * On rejection, browserPromise is cleared so a retry will re-launch.
  */
@@ -85,38 +70,6 @@ async function getBrowser(): Promise<Browser> {
 
 		const b = await chromium.launch({ headless: true });
 		browser = b;
-
-		// Obtain the browser child process via Playwright's internal API and
-		// immediately unref it so Node.js can exit naturally when idle.
-		// Wrapped in try/catch: if Playwright changes its internal structure,
-		// this degrades gracefully instead of throwing.
-		try {
-			type BrowserImpl = {
-				options?: {
-					browserProcess?: {
-						process?: { ref?: () => void; unref?: () => void } | null;
-					};
-				};
-			};
-			type ConnectionLike = {
-				_localUtils?: {
-					_connection?: {
-						toImpl?: (b: Browser) => BrowserImpl;
-					};
-				};
-			};
-			const conn = (b as unknown as { _connection?: ConnectionLike })._connection;
-			const impl = conn?._localUtils?._connection?.toImpl?.(b);
-			const childProc = impl?.options?.browserProcess?.process;
-			if (childProc && typeof childProc.unref === "function") {
-				browserChildProcess = childProc;
-				childProc.unref();
-			}
-		} catch {
-			// Playwright internal structure changed — continue without unref.
-			// The process will still exit correctly once closeBrowser() is called.
-		}
-
 		return b;
 	};
 
@@ -320,19 +273,18 @@ export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentToo
  * Core screenshot capture logic, shared by execute() and run().
  *
  * Event-loop lifecycle:
- *   Before any I/O: ref all browser handles so the event loop stays alive.
- *   After context.close() in finally: unref all browser handles so the process
- *   can exit naturally when the caller has no more work to do.
+ *   Playwright's browser child process keeps the Node.js event loop alive
+ *   regardless of ref/unref calls (the internal handle paths Playwright uses
+ *   vary across versions and the unref approach via private internals is
+ *   unreliable). To guarantee the process can exit after a capture, the
+ *   browser is explicitly closed at the end of every capture via closeBrowser().
+ *   The browser singleton is recreated on the next call to captureScreenshot().
  *
- * This means: if the caller does NOT call closeBrowser() after their last
- * capture, the process will still exit cleanly (the unref-ed handles do not
- * prevent exit). If the caller DOES call closeBrowser(), the browser is
- * terminated and all handles are released immediately.
- *
- * For sequential captures (multiple awaited tool.run() calls), the handles are
- * ref()ed at the start of each capture and unref()ed after. Because the next
- * capture's ref() call happens synchronously in the microtask continuation
- * (before any macrotask can run), the event loop never drains between captures.
+ * Performance note: closing and reopening the browser on every capture adds
+ * ~1-3 s overhead per call. This is acceptable for one-off tool invocations.
+ * For bulk captures in the same process, callers that need higher throughput
+ * can call captureScreenshot() in sequence (each call relaunches chromium) or
+ * use Playwright directly.
  *
  * attachImage deduplication: if ctx provides an attachImage callback, only that
  * one is called. The opts-level callback is only called when no ctx callback is
@@ -353,11 +305,8 @@ async function captureScreenshot(
 
 	const b = await getBrowser();
 
-	// Ref browser handles AFTER getBrowser() returns so they are populated and
-	// the I/O for this capture keeps the event loop alive.
-	refBrowserHandles();
-
 	let context: Awaited<ReturnType<Browser["newContext"]>> | undefined;
+	let result: ScreenshotResult;
 	try {
 		context = await b.newContext({
 			viewport: { width, height },
@@ -394,7 +343,7 @@ async function captureScreenshot(
 			},
 		};
 
-		return {
+		result = {
 			content: [
 				{ type: "text" as const, text: `Screenshot captured: ${url} (${width}×${height}px, ${pngBuffer.length} bytes)` },
 				imagePart,
@@ -414,9 +363,12 @@ async function captureScreenshot(
 		} catch {
 			// ignore
 		}
-		// Unref browser handles after the capture so they do not prevent the
-		// Node.js process from exiting when the caller has no more work to do.
-		// The next call to captureScreenshot() will ref them again before I/O.
-		unrefBrowserHandles();
+		// Always close the browser after each capture so Playwright's child-process
+		// handles are fully released and the Node.js event loop can drain without
+		// a process.exit() call. The unref()-via-private-internals strategy is
+		// unreliable across Playwright versions; explicit close is the only
+		// guaranteed approach.
+		await closeBrowser();
 	}
+	return result!;
 }

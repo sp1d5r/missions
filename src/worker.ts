@@ -128,7 +128,13 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult
 			tools: [
 				...createCodingTools(cwd, env ? { bash: { spawnHook: (ctx) => ({ ...ctx, env }) } } : undefined),
 				// Headless-browser screenshot — reusable by any future mission.
-				createScreenshotTool(),
+				// Wire attachImage so captured screenshots flow through onProgress into
+				// the mission store (same path as tool_execution_end image extraction).
+				createScreenshotTool({
+					attachImage: onProgress
+						? (data: Buffer, mimeType: string) => onProgress({ type: "image", data, mimeType, toolName: "screenshot" })
+						: undefined,
+				}),
 				// Read-only fan-out. Scout spend is charged straight to this worker's total,
 				// so delegating is a budget decision the same as any other tool call.
 				...(scouts?.length
@@ -264,6 +270,12 @@ Make the change now, then emit your handoff block.`;
 		await agent.prompt(task);
 	} catch (err) {
 		errorMessage = err instanceof Error ? err.message : String(err);
+	} finally {
+		// Release the Playwright browser singleton so its child-process handles
+		// do not keep the Node.js event loop alive after the worker finishes.
+		// closeBrowser() is idempotent and safe to call even if the screenshot
+		// tool was never used.
+		await closeBrowser();
 	}
 	await agent.waitForIdle();
 	// NOT unregistered here. This used to drop the worker the instant its turn ended — before
