@@ -120,10 +120,11 @@ export function resolveMissionEnv(options: ResolveMissionEnvOptions): NodeJS.Pro
 	env.MISSIONS_TARGET_REPO = targetCwd;
 
 	// LLM-authored assertions guess at names for these instead of using the MISSIONS_* markers
-	// above ($WORKTREE, $MISSION_WORKTREE, $REPO, $MISSION_ID all observed on one real mission).
-	// Alias the guesses rather than policing them.
+	// above ($WORKTREE, $MISSION_WORKTREE, $REPO, $MISSION_ID, $MISSION_DIR all observed on real
+	// missions). Alias the guesses rather than policing them.
 	env.WORKTREE = workCwd;
 	env.MISSION_WORKTREE = workCwd;
+	env.MISSION_DIR = workCwd;
 	env.REPO = workCwd;
 	env.MISSION_ID = missionId;
 
