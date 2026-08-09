@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { AutoRefresh } from "@/components/auto-refresh";
-import { Denied, StatStrip } from "@/components/chrome";
+import { Denied, StatStrip, Tag, toneFor } from "@/components/chrome";
 import { Shell, ThreadHead } from "@/components/shell";
 import { board, summary } from "@/lib/data";
 import { session } from "@/lib/guard";
@@ -73,9 +73,30 @@ export default async function Board({
 							.filter((r) => !r.done)
 							.map((r) => (
 								<li key={r.id}>
+									<Tag tone={toneFor(r)}>{r.stalled ? "stalled" : "open"}</Tag>{" "}
 									<Link href={`/m/${r.id}`}>{r.name}</Link>{" "}
 									<span className="dim">
 										{r.status} · {r.milestone ?? 0}/{r.maxMilestones ?? "?"} · $
+										{(r.costUsd ?? 0).toFixed(2)}
+									</span>
+								</li>
+							))}
+					</ul>
+				)}
+
+				<h2>Done</h2>
+				{rows.filter((r) => r.done && !r.needsYou).length === 0 ? (
+					<div className="empty">Nothing closed out yet.</div>
+				) : (
+					<ul className="log">
+						{rows
+							.filter((r) => r.done && !r.needsYou)
+							.map((r) => (
+								<li key={r.id}>
+									<Tag tone={toneFor(r)}>closed · {r.verdict ?? r.status}</Tag>{" "}
+									<Link href={`/m/${r.id}`}>{r.name}</Link>{" "}
+									<span className="dim">
+										{r.milestone ?? 0}/{r.maxMilestones ?? "?"} · $
 										{(r.costUsd ?? 0).toFixed(2)}
 									</span>
 								</li>
