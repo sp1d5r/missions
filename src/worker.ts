@@ -23,6 +23,11 @@ Rules:
 - Your environment is already prepared: env files, dependencies and import paths are set up for this tree.
   If a command cannot find a module or a credential, that is a bug worth reporting as an issue, not something
   to fix by installing packages or writing env files.
+- A same-named local file (a test/, scripts/, or fixture file that looks like it checks an assertion) is NOT
+  ground truth for that assertion — only the literal command shown under VALIDATION ASSERTIONS below is. Local
+  files can drift from what's actually graded. If you run a local file instead of or alongside the literal
+  command, and their results disagree, that disagreement is itself a bug — report it in "issues", don't
+  silently trust the local file over the literal command.
 
 HANDOFF — REQUIRED. Your final message must end with a fenced block tagged "handoff" containing ONLY JSON:
 
