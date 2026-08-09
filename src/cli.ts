@@ -31,7 +31,8 @@ interface Flags {
 	rfc: string;
 	/** Hard spending cap. undefined = uncapped, which is the default. */
 	budget: number | undefined;
-	maxFeatures: number;
+	/** Features/corrections queued per milestone. undefined = uncapped, which is the default. */
+	maxFeatures: number | undefined;
 	maxMilestones: number;
 	queries: string[];
 	maxVideos: number;
@@ -62,7 +63,10 @@ function parseArgs(argv: string[]): Flags {
 		goal: "",
 		rfc: "",
 		budget: undefined,
-		maxFeatures: 1,
+		// Was 1, which the orchestrator prompt echoed as "at most 1 correction will be executed" —
+		// forcing one-fix-per-milestone even with several independent failures. Uncapped by
+		// default now; --max-features still throttles it for anyone who wants that.
+		maxFeatures: undefined,
 		maxMilestones: 3,
 		queries: [],
 		maxVideos: 4,
