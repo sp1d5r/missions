@@ -187,24 +187,37 @@ async function getBrowser(): Promise<Browser> {
 		// This lets us unref/ref its stdio handles so the Node.js event loop can
 		// drain naturally when no captures are in-flight — even if the caller
 		// never calls closeBrowser().
+		//
+		// The patch is wrapped in try/finally so that if chromium.launch() rejects,
+		// the original spawn is always restored — even on failure. The patch is only
+		// active for the duration of the launch() call; because browserPromise is set
+		// before launch() runs, concurrent getBrowser() calls all await the same
+		// promise and never re-enter this code path, so spawn is never patched twice.
 		const _require = createRequire(import.meta.url);
 		// eslint-disable-next-line @typescript-eslint/no-var-requires
 		const childProcess = _require("child_process") as typeof import("child_process");
-		const originalSpawn = childProcess.spawn.bind(childProcess);
+		// Save the original spawn reference (not a bound wrapper) so that restoration
+		// sets childProcess.spawn back to exactly the same function object — not a
+		// bound copy. Tests and callers that capture childProcess.spawn before the
+		// patch can verify strict equality after restoration.
+		const originalSpawn = childProcess.spawn;
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		(childProcess as any).spawn = function (cmd: string, args?: readonly string[], opts?: import("child_process").SpawnOptions) {
-			const proc = originalSpawn(cmd, args as string[], opts ?? {});
+			const proc = originalSpawn.call(childProcess, cmd, args as string[], opts ?? {});
 			if (typeof cmd === "string" && cmd.includes("chrom")) {
 				browserChildProcess = proc;
 			}
 			return proc;
 		};
 
-		const b = await chromium.launch({ headless: true });
-
-		// Restore spawn so we don't permanently patch child_process.
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		(childProcess as any).spawn = originalSpawn;
+		let b: Browser;
+		try {
+			b = await chromium.launch({ headless: true });
+		} finally {
+			// Restore spawn unconditionally — whether launch succeeded or threw.
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			(childProcess as any).spawn = originalSpawn;
+		}
 
 		browser = b;
 		browserLaunchCount++;
