@@ -438,20 +438,6 @@ textarea { resize: vertical; min-height: 76px; }
 .cmsg.is-system .cmsg-who[data-role="system"] { color: var(--bad); }
 .cmsg-who[title] { cursor: help; }
 
-/* ── threaded replies ──────────────────────────────────────────────────────── */
-.replies { margin: 4px 0 2px; }
-.replies-toggle {
-  background: none;
-  border: 0;
-  padding: 2px 0;
-  font: inherit;
-  font-size: 11px;
-  color: var(--live);
-  cursor: pointer;
-  letter-spacing: .02em;
-}
-.replies-toggle:hover { text-decoration: underline; }
-.replies-bad { color: var(--bad); }
 /* A stalled count in the org tally — amber, because it wants a decision, not because it broke. */
 .tally-bad { color: var(--warn); }
 
@@ -611,6 +597,12 @@ textarea { resize: vertical; min-height: 76px; }
   gap: 10px; margin-top: 8px;
 }
 .composer-bar .row { flex: 1 1 auto; }
+/* Act-and-ask sit under a textarea that already draws the eye; full-size (40px, thumb-sized)
+   buttons here read as heavier than the composer itself. Smaller, but never below the 24px a
+   pointer still lands on reliably. */
+.composer-bar button {
+  padding: 5px 10px; min-height: 26px; font-size: 9.5px;
+}
 
 /* Streaming caret — the one moving thing on the page, so it reads as "still writing". */
 .caret {
@@ -620,20 +612,6 @@ textarea { resize: vertical; min-height: 76px; }
 }
 @keyframes caret-blink { 0%, 50% { opacity: 1 } 50.01%, 100% { opacity: 0 } }
 @media (prefers-reduced-motion: reduce) { .caret { animation: none } }
-/* The rail is the thread: indented and hairlined, so replies read as subordinate at a glance. */
-.replies-body {
-  margin: 4px 0 2px 2px;
-  padding-left: 10px;
-  border-left: 1px solid var(--hairline);
-}
-.reply { padding: 3px 0; }
-.reply-label { font-size: 12px; color: var(--text-dim); }
-/*
- * Passing assertions stay dim — twenty of them in a row is the good news, and colouring good
- * news is how a palette stops meaning anything. The failures are what the thread was opened for.
- */
-.reply.is-bad .reply-label { color: var(--bad); }
-.reply.is-bad { border-left: 1px solid var(--bad); margin-left: -11px; padding-left: 10px; }
 .cmsg-when { color: var(--text-faint); font-size: 10px; font-variant-numeric: tabular-nums; }
 .cmsg-text {
   white-space: pre-wrap; word-break: break-word;
@@ -656,6 +634,99 @@ textarea { resize: vertical; min-height: 76px; }
   border: 1px solid var(--hairline);
   background: var(--panel);
 }
+
+/* ── markdown, inside cmsg-text ────────────────────────────────────────────
+   Overseer answers and orchestrator assessments are LLM prose — bold, code,
+   the odd table. `.cmsg-text` already sets white-space: pre-wrap for plain
+   text; these children override that locally since they carry their own
+   block structure now instead of relying on literal newlines. */
+.cmsg-text p { margin: 0; white-space: normal; }
+.cmsg-text ul, .cmsg-text ol { margin: 0; padding-left: 20px; white-space: normal; }
+.cmsg-text li { margin: 3px 0; }
+.cmsg-text strong { color: var(--text); font-weight: 600; }
+.cmsg-text code { color: var(--text); background: var(--panel-raised); padding: 0 4px; white-space: normal; }
+.cmsg-text > * + * { margin-top: 10px; }
+.mdtable-wrap { overflow-x: auto; }
+.mdtable { border-collapse: collapse; width: 100%; font-size: 11.5px; }
+.mdtable th, .mdtable td { border: 1px solid var(--hairline); padding: 4px 8px; text-align: left; vertical-align: top; }
+.mdtable th { color: var(--text-dim); font-weight: 400; text-transform: uppercase; font-size: 9.5px; letter-spacing: .06em; }
+
+/* ── milestone attempt cards ────────────────────────────────────────────────
+   A milestone is a diff, not a log: what got fixed, what broke, what's still
+   stuck — not forty checkmarks at the same visual weight as each other.
+   Collapsed by default for the same reason .replies is: the headline is the
+   diff line in the summary, and the full checklist is one click away, not in
+   the way. */
+.attempt { border: 1px solid var(--hairline); margin: 10px 0; }
+.attempt.is-flagged { border-color: var(--warn); }
+.attempt > summary {
+  display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+  cursor: pointer; list-style: none; background: var(--panel);
+}
+.attempt > summary::-webkit-details-marker { display: none; }
+.attempt > summary::before { content: "▸"; color: var(--text-faint); font-size: 10px; transition: transform .12s ease; }
+.attempt[open] > summary::before { transform: rotate(90deg); }
+.attempt-verdict { font-size: 12px; color: var(--text); min-width: 34px; font-variant-numeric: tabular-nums; }
+.attempt-diff { flex: 1 1 auto; font-size: 11.5px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Fixed stays dim on purpose — colouring good news is how a palette stops meaning anything (see
+   the theme note at the top of this file). Only what still wants a decision gets a colour. */
+.attempt-diff .fx { color: var(--text-dim); }
+.attempt-diff .nw { color: var(--bad); }
+.attempt-diff .st { color: var(--warn); }
+.attempt-meta { font-size: 10.5px; color: var(--text-faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.attempt-body { padding: 10px 12px 12px; border-top: 1px solid var(--hairline); display: flex; flex-direction: column; gap: 6px; }
+.diff-line { display: flex; gap: 8px; align-items: baseline; padding: 2px 0; font-size: 12px; }
+.diff-line .mark { width: 14px; flex: 0 0 auto; text-align: center; }
+.diff-line.newfail .mark { color: var(--bad); }
+.diff-line.stillfail .mark { color: var(--warn); }
+.diff-line.flip .mark { color: var(--warn); }
+.diff-line .stmt { color: var(--text-dim); }
+.diff-line .id { color: var(--text); margin-right: 4px; }
+
+.full-checklist { margin-top: 2px; }
+.full-checklist > summary { font-size: 10.5px; color: var(--live); cursor: pointer; letter-spacing: .02em; list-style: none; }
+.full-checklist > summary::-webkit-details-marker { display: none; }
+.full-checklist > summary:hover { text-decoration: underline; }
+.cl-row { display: flex; gap: 8px; align-items: baseline; padding: 2px 0; font-size: 11.5px; }
+.cl-row .mk { width: 14px; flex: 0 0 auto; text-align: center; }
+.cl-row.fail .mk { color: var(--bad); }
+.cl-row.pass .mk { color: var(--text-faint); }
+.cl-row.flipped .mk { color: var(--warn); }
+.cl-row .id { color: var(--text-dim); margin-right: 4px; }
+.cl-row .stmt { color: var(--text-faint); }
+
+/* Long-form investigation prose, collapsed the same way as .attempt-body/.full-checklist. */
+.trace-toggle { margin-top: 2px; }
+.trace-toggle > summary {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 10px; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--live); cursor: pointer; list-style: none;
+}
+.trace-toggle > summary::-webkit-details-marker { display: none; }
+.trace-toggle > summary::before { content: "▸"; font-size: 9px; transition: transform .12s ease; }
+.trace-toggle[open] > summary::before { transform: rotate(90deg); }
+.trace-toggle > summary:hover { text-decoration: underline; }
+.trace-body {
+  margin-top: 10px; padding: 12px 14px;
+  border: 1px solid var(--hairline); background: var(--panel);
+  color: var(--text-dim);
+  display: flex; flex-direction: column; gap: 10px;
+}
+.trace-body > * + * { margin-top: 0; }
+
+/* A close control at the bottom of any long toggle, so collapsing it doesn't require scrolling
+   back up to find the summary line you opened. */
+.closer {
+  display: inline-flex; align-items: center; gap: 5px;
+  font: inherit; font-size: 10px; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--text-dim); background: none; border: 1px solid var(--hairline);
+  padding: 4px 9px; cursor: pointer; border-radius: 2px; min-height: 0;
+}
+.closer::before { content: "▴"; font-size: 9px; }
+.closer:hover { color: var(--live); border-color: var(--live); background: none; }
+.attempt > .closer { margin: 0 12px 12px; }
+.full-checklist > .closer { margin: 6px 0 0; }
+.trace-toggle > .closer { margin: 10px 0 0; }
 
 /*
  * Repo focus picker in the chief pane.

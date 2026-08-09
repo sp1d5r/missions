@@ -2,14 +2,14 @@ import { notFound, redirect } from "next/navigation";
 import { AutoRefresh } from "@/components/auto-refresh";
 import { Denied, Ident, Tag, toneFor, type Tone } from "@/components/chrome";
 import { PanelErrorBoundary } from "@/components/error-boundary";
-import { MissionChat } from "@/components/mission-chat";
 import { MissionDiagrams } from "@/components/mission-diagrams";
 import { MissionLive } from "@/components/mission-live";
-import { MissionThread } from "@/components/mission-thread";
+import { MissionTimeline } from "@/components/mission-timeline";
 import { ScopingDoc } from "@/components/scoping-doc";
 import { Shell, ThreadHead } from "@/components/shell";
 import { mission, record } from "@/lib/data";
 import { mayMutate, session } from "@/lib/guard";
+import { computeMilestoneDiffs } from "@/lib/milestone-diff";
 
 export const dynamic = "force-dynamic";
 
@@ -36,6 +36,7 @@ export default async function Mission({ params }: { params: Promise<{ id: string
 	const behavioural = sb?.behavioural;
 	const downgraded = (sc?.checks ?? []).filter((c) => c.strengthCorrected);
 	const events = st?.events ?? [];
+	const milestoneDiffs = st ? computeMilestoneDiffs(st) : [];
 
 	return (
 		<Shell op={op} pane="main">
@@ -158,16 +159,16 @@ export default async function Mission({ params }: { params: Promise<{ id: string
 					{/* Rendered for every mission kind — screenshot, video, coding, etc. */}
 					<MissionLive id={id} initialDone={rec.done} />
 
-					{/* A client component: replies expand in place, which is the whole point of them. */}
-					<MissionThread events={events} id={id} />
-
-					{/* Questions land here, answered here — see mission-chat.tsx. */}
-					<MissionChat
+					{/* Events, milestone attempts and the overseer Q&A, interleaved in one thread —
+					 * see mission-timeline.tsx. */}
+					<MissionTimeline
 						id={rec.id}
 						name={rec.name}
 						done={rec.done}
 						cleared={Boolean(rec.cleared)}
 						canMutate={mayMutate(op)}
+						events={events}
+						milestoneDiffs={milestoneDiffs}
 					/>
 				</div>
 			</div>
