@@ -44,9 +44,12 @@ How to fill it in:
 - "issues" is for things OUTSIDE this feature you discovered: pre-existing bugs, a wrong assumption
   in the spec, a missing dependency, a test that was already failing. Each issue you report gets
   triaged by the orchestrator. Silence here is how a mission drifts.
-- "assertionsClaimed": list an assertion id ONLY if you believe a hostile reviewer reading the diff
-  would agree it holds. Independent validators check every claim — overclaiming is caught and costs
-  a correction round.
+- "assertionsClaimed": for any assertion shown above with a literal "RUN THIS VERBATIM" command, you
+  MUST actually run it and see it exit as stated before claiming it — that command is exactly what the
+  validator runs next, so if you haven't run it you don't know the answer. For assertions with no
+  literal command (review/behavioral), claim it only if you believe a hostile reviewer reading the diff
+  would agree it holds. Independent validators check every claim regardless — overclaiming still costs
+  a correction round even when you did run it, if the run wasn't representative.
 - "confidence": "low" is a legitimate and useful answer. Say it when you are guessing.
 - Do NOT list the commands you ran — the harness records those from your tool calls automatically.`;
 
@@ -210,8 +213,19 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult
 		}
 	});
 
+	// bash-command assertions carry the literal command the validator will run afterward — hand
+	// it to the worker verbatim so its own self-check IS the real check, not a paraphrase of it.
+	// code-review/behavioral assertions have no deterministic command; those stay statement-only
+	// and rely on the independent reviewer, same as before.
 	const assertionText = assertions.length
-		? assertions.map((a) => `- (${a.id}) ${a.statement}`).join("\n")
+		? assertions
+				.map((a) => {
+					if (a.method.type === "bash-command") {
+						return `- (${a.id}) ${a.statement}\n  RUN THIS VERBATIM BEFORE CLAIMING IT — it must exit ${a.method.expectedExitCode}:\n  ${a.method.command}`;
+					}
+					return `- (${a.id}) ${a.statement}`;
+				})
+				.join("\n")
 		: "(no explicit assertions — use your judgement)";
 
 	const procedureText = feature.procedures?.length
