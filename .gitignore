@@ -2,3 +2,5 @@ node_modules/
 dist/
 .missions/
 *.log
+.mission-e2e/
+

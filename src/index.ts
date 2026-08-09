@@ -1,7 +1,7 @@
 export { runMission, resumeMission, decideResume, isHarnessStale } from "./mission.js";
 export type { MissionEvent, ResumeOpts, ResumeProbes, DecideResumeResult, ResumeMissionOpts } from "./mission.js";
 export { planMission } from "./orchestrator.js";
-export { runWorker } from "./worker.js";
+export { runWorker, extractImageParts, getWorkerTool, createScreenshotTool } from "./worker.js";
 export { runValidators } from "./validators/index.js";
 export { generateReport } from "./report.js";
 export { runChief } from "./chief.js";
@@ -10,3 +10,4 @@ export { discoverEnvFiles, topLevelRecon } from "./target/index.js";
 export { runSetup, observeProduced, findSetupDoc } from "./setup.js";
 export { DEFAULT_ROUTING, ANTHROPIC_ONLY_ROUTING, autoRouting, parseModelSpec } from "./models.js";
 export * from "./types.js";
+export { openStore } from "./store-api.js";
