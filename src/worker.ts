@@ -3,14 +3,14 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { type AgentSpec, createDelegateTool } from "./subagent.js";
 import { Agent, getEnvApiKey, getModel, streamFn, type AgentEvent, type AgentMessage, type AssistantMessage } from "./pi.js";
-import { createScreenshotTool, closeBrowser, acquireBrowserRef, releaseBrowserRef, type ScreenshotToolOptions, type ScreenshotParams, type ScreenshotResult } from "./worker/tools/screenshot.js";
+import { createScreenshotTool, closeBrowser, acquireBrowserRef, releaseBrowserRef, _testSetLaunchOverride, type ScreenshotToolOptions, type ScreenshotParams, type ScreenshotResult } from "./worker/tools/screenshot.js";
 import { parseJson } from "./llm.js";
 import { registerWorker } from "./workers.js";
 import type { AgentTool } from "./pi.js";
 import type { Assertion, CommandRecord, Feature, Handoff, HandoffIssue, ModelSpec } from "./types.js";
 
 // Re-export screenshot tool factory and browser lifecycle helpers so callers can import them from worker.ts
-export { createScreenshotTool, closeBrowser, acquireBrowserRef, releaseBrowserRef };
+export { createScreenshotTool, closeBrowser, acquireBrowserRef, releaseBrowserRef, _testSetLaunchOverride };
 export type { ScreenshotToolOptions, ScreenshotParams, ScreenshotResult };
 
 const SYSTEM_PROMPT = `You are a CODING WORKER in an autonomous engineering org.

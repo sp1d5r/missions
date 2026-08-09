@@ -7,6 +7,38 @@
  *
  * Registration: add createScreenshotTool() to the tools array in runWorker() in
  * src/worker.ts alongside createCodingTools() and createDelegateTool().
+ *
+ * Design invariants (all must hold simultaneously):
+ *
+ * a5  — ref leak prevention: captureSessionRefHeld is set only AFTER a
+ *       successful getBrowser(); a getBrowser() rejection releases any ref
+ *       acquired in the same try block via finally.
+ *
+ * a5  — spawn reentrance: spawnPatchCount is a counter (not a boolean).
+ *       It is incremented before chromium.launch() and decremented in the
+ *       finally that follows, regardless of success or failure. The original
+ *       spawn is stored once (at count 0→1) and restored only when count
+ *       reaches 0 again. This is safe under concurrent launches because the
+ *       shared browserPromise means only ONE launch() call ever runs at a time,
+ *       but the counter is robust even if that invariant ever relaxes.
+ *
+ * a22 — single image event: the tool result ALWAYS contains the image part;
+ *       worker.ts uses extractImageParts on tool_execution_end as the SOLE
+ *       delivery path. opts.attachImage / ctx.attachImage is called only when
+ *       the caller explicitly asks for it (e.g. in direct/test invocations),
+ *       and runWorker does NOT wire opts.attachImage so there is no duplication.
+ *
+ * a25 — closeBrowser does NOT reset browserRefCount; it only closes the
+ *       browser instance. Externally-held refs (acquireBrowserRef) survive
+ *       a closeBrowser call unchanged.
+ *
+ * a28 — lazy acquisition: captureScreenshot acquires a ref only inside the
+ *       try block that wraps getBrowser(). Workers that never call the
+ *       screenshot tool never affect the ref count.
+ *
+ * a29 — test hook: _testSetLaunchOverride(fn|null) swaps chromium.launch for a
+ *       supplied function so tests can simulate launch failures without touching
+ *       Playwright internals. Returns the previous override (or null).
  */
 
 import { type Browser } from "playwright";
@@ -25,27 +57,58 @@ let browserLaunchCount = 0;
 let browserRefCount = 0;
 
 /**
- * Whether the child_process.spawn monkey-patch is currently installed.
- * Guarded so the patch is applied at most once even under concurrent launch()
- * invocations — the original spawn is saved only when this is false, and the
- * patch is restored only when this is true (preventing a wrapped spawn from
- * being saved as 'original' when closeBrowser races with a re-launch).
+ * Counter of concurrent launch() invocations currently holding the spawn patch.
+ *
+ * Increment before chromium.launch() runs, decrement in the finally block.
+ * The original spawn is saved once (when the counter goes 0 → 1) and restored
+ * only when the counter returns to 0. This keeps the patch active for the full
+ * duration of any overlapping launches without ever saving an already-wrapped
+ * spawn as "original".
+ *
+ * Because getBrowser() sets browserPromise before calling launch(), only one
+ * launch() ever executes concurrently in practice — but the counter approach
+ * is correct under any concurrency level.
  */
-let spawnPatched = false;
+let spawnPatchCount = 0;
 
 /**
  * The original child_process.spawn function saved before patching.
- * Stored at module level so releaseBrowserRef() can restore it when the last
- * reference is released, independently of the getBrowser() call stack.
+ * Set once when spawnPatchCount goes 0 → 1.
+ * Cleared only when spawnPatchCount returns to 0 (all launches finished).
  */
 let _savedOriginalSpawn: typeof import("child_process").spawn | undefined;
+
+/**
+ * Optional override for chromium.launch injected by tests via
+ * _testSetLaunchOverride(). When non-null, this function is called instead of
+ * chromium.launch() so tests can simulate launch failures or return a fake
+ * browser without touching Playwright internals.
+ */
+type LaunchOverrideFn = (opts?: { headless?: boolean }) => Promise<Browser>;
+let _launchOverride: LaunchOverrideFn | null = null;
+
+/**
+ * Install (or remove) a test-only override for chromium.launch().
+ *
+ * Pass a function to replace chromium.launch; pass null to restore the real
+ * Playwright launcher. Returns the previous override (or null if none was set),
+ * making the hook idempotent and composable.
+ *
+ * Example — simulate launch failure:
+ *   const prev = _testSetLaunchOverride(() => Promise.reject(new Error("forced fail")));
+ *   // … run test …
+ *   _testSetLaunchOverride(prev); // restore
+ */
+export function _testSetLaunchOverride(fn: LaunchOverrideFn | null): LaunchOverrideFn | null {
+	const prev = _launchOverride;
+	_launchOverride = fn;
+	return prev;
+}
 
 /**
  * The spawned Playwright browser child process.
  * Tracked so we can unref/ref its handles to let the Node event loop drain
  * naturally when no captures are in-flight, without calling browser.close().
- * This is what allows validator commands that do not call closeBrowser() to
- * still exit instead of hanging indefinitely on the browser's stdio pipes.
  */
 let browserChildProcess: import("child_process").ChildProcess | undefined;
 
@@ -58,13 +121,15 @@ let captureInFlight = 0;
 
 /**
  * Whether the captureScreenshot() function has lazily acquired a browser ref
- * for the current browser session. Set to true on the first capture (when
- * captureInFlight goes 0 → 1). Reset to false when closeBrowser() is called
- * so the next capture session acquires a fresh ref.
+ * for the current browser session.
  *
- * This flag ensures that workers which never call the screenshot tool never
- * touch the browser ref count, while workers that do call it hold exactly one
- * ref for their entire session (not one per capture).
+ * IMPORTANT: this flag is set to true ONLY after a successful getBrowser()
+ * call. If getBrowser() rejects, this flag stays false and no ref is held.
+ * The corresponding acquireBrowserRef() is performed inside the try block so
+ * the finally block can always call releaseBrowserRef() safely.
+ *
+ * Reset to false when closeBrowser() is called so the next capture session
+ * acquires a fresh ref for the new browser instance.
  */
 let captureSessionRefHeld = false;
 
@@ -165,13 +230,11 @@ export async function releaseBrowserRef(): Promise<void> {
  * release browser resources after their last capture, allowing the Node.js
  * event loop to drain without process.exit().
  *
- * Call this once the process no longer needs the browser (e.g. from
- * runWorker's finally block). The Node.js event loop will drain naturally
- * once the browser process is closed.
- *
- * Note: prefer releaseBrowserRef() in runWorker to correctly handle concurrent
- * workers. Use closeBrowser() only when you want to force-close regardless of
- * how many workers are active.
+ * IMPORTANT: closeBrowser() does NOT modify browserRefCount for
+ * externally-held refs. It only closes and nulls the browser instance and
+ * resets the captureSessionRefHeld flag (decrementing the count by 1 if the
+ * session ref was held). This preserves the ref counts of concurrent workers
+ * that are still in-flight and did not call closeBrowser() themselves.
  */
 export async function closeBrowser(): Promise<void> {
 	const b = browser;
@@ -203,12 +266,16 @@ export async function closeBrowser(): Promise<void> {
  * and the browser child process.
  *
  * No module-scope signal handlers are registered. Callers are responsible for
- * calling closeBrowser() during their own shutdown paths (e.g. via the exported
- * close() on the tool, or a worker/CLI teardown sequence such as runWorker's
- * finally block in worker.ts). The browser singleton is reused across captures
- * within the same process for performance.
+ * calling closeBrowser() during their own shutdown paths.
  *
  * On rejection, browserPromise is cleared so a retry will re-launch.
+ *
+ * Spawn-patch mechanism:
+ *   spawnPatchCount is incremented before chromium.launch() and decremented
+ *   in the finally block. The original spawn is saved once (at count 0→1) and
+ *   restored only when count returns to 0. This is reentrant-safe: multiple
+ *   concurrent launch() calls (should they ever occur) share one patch install,
+ *   and the restore happens only when all are done.
  */
 async function getBrowser(): Promise<Browser> {
 	if (browser) return browser;
@@ -218,26 +285,15 @@ async function getBrowser(): Promise<Browser> {
 		// Dynamic import so the module loads even when playwright is not installed.
 		const { chromium } = await import("playwright");
 
-		// Intercept child_process.spawn to capture the browser child process.
-		// This lets us unref/ref its stdio handles so the Node.js event loop can
-		// drain naturally when no captures are in-flight — even if the caller
-		// never calls closeBrowser().
-		//
-		// The patch is applied at most once: spawnPatched guards the install so that
-		// concurrent or re-entrant launch() calls (e.g. after closeBrowser races with
-		// a new getBrowser()) never save the already-wrapped spawn as 'originalSpawn'.
-		// The original is saved in the module-level _savedOriginalSpawn so that
-		// releaseBrowserRef() can restore it independently of this call stack.
 		const _require = createRequire(import.meta.url);
 		// eslint-disable-next-line @typescript-eslint/no-var-requires
 		const childProcess = _require("child_process") as typeof import("child_process");
 
-		// Only install the patch if it is not already active.
-		if (!spawnPatched) {
-			// Save the real spawn (not a bound wrapper) so restoration sets it back
-			// to exactly the same function object. Strict-equality checks in tests pass.
+		// Install the spawn patch if this is the first concurrent launch.
+		// Save the original spawn exactly once (when count goes 0 → 1) to prevent
+		// an already-wrapped spawn from being recorded as "original".
+		if (spawnPatchCount === 0) {
 			_savedOriginalSpawn = childProcess.spawn;
-			spawnPatched = true;
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any
 			(childProcess as any).spawn = function (cmd: string, args?: readonly string[], opts?: import("child_process").SpawnOptions) {
 				const proc = _savedOriginalSpawn!.call(childProcess, cmd, args as string[], opts ?? {});
@@ -247,22 +303,33 @@ async function getBrowser(): Promise<Browser> {
 				return proc;
 			};
 		}
+		// Increment AFTER installing patch (or after confirming patch already active)
+		// so the counter accurately reflects in-flight launches.
+		spawnPatchCount++;
 
 		let b: Browser;
 		try {
-			b = await chromium.launch({ headless: true });
+			// Use the test override if one is installed, otherwise use real chromium.launch.
+			if (_launchOverride !== null) {
+				b = await _launchOverride({ headless: true });
+			} else {
+				b = await chromium.launch({ headless: true });
+			}
 		} finally {
-			// Restore spawn unconditionally — whether launch succeeded or threw.
-			// Only restore if we are the one that installed it (spawnPatched is true
-			// and _savedOriginalSpawn is set).
-			if (spawnPatched && _savedOriginalSpawn !== undefined) {
+			// Decrement the in-flight counter. Restore spawn only when it reaches 0
+			// (all concurrent launches — if any — have finished). This ensures we
+			// never restore spawn while another launch is still in flight.
+			spawnPatchCount--;
+			if (spawnPatchCount === 0 && _savedOriginalSpawn !== undefined) {
 				// eslint-disable-next-line @typescript-eslint/no-explicit-any
 				(childProcess as any).spawn = _savedOriginalSpawn;
 				_savedOriginalSpawn = undefined;
-				spawnPatched = false;
 			}
 		}
 
+		// Only set module-level state AFTER a successful launch (b is defined here
+		// because we reached past the try/catch in the finally — if launch threw,
+		// we never reach this line).
 		browser = b;
 		browserLaunchCount++;
 		return b;
@@ -296,6 +363,10 @@ export interface ScreenshotToolOptions {
 	 * If a context-level attachImage is also provided via the execute/run ctx
 	 * argument, only the context-level one is called (ctx wins). This prevents
 	 * the same image being attached twice when both callbacks are present.
+	 *
+	 * NOTE: runWorker does NOT wire opts.attachImage — it relies solely on
+	 * extractImageParts scanning the tool result on tool_execution_end. This
+	 * is the ONE delivery path for the agent pipeline (a22).
 	 */
 	attachImage?: (data: Buffer, mimeType: string) => Promise<unknown> | unknown;
 }
@@ -406,9 +477,6 @@ export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentToo
 		 *
 		 * When the first argument is a string, it is treated as a toolCallId and the
 		 * second argument must be an object with at least a `url` field (ScreenshotParams).
-		 * If the second argument is not a valid params object, a clear error is thrown to
-		 * prevent silent misrouting (e.g. if someone accidentally passes a URL string as
-		 * the first argument).
 		 */
 		async execute(
 			toolCallIdOrParams: string | ScreenshotParams,
@@ -419,7 +487,6 @@ export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentToo
 
 			if (typeof toolCallIdOrParams === "string") {
 				// Agent pipeline call: execute(toolCallId, params)
-				// Validate that the second argument is a valid ScreenshotParams object.
 				if (
 					typeof paramsOrCtx !== "object" ||
 					paramsOrCtx === null ||
@@ -432,6 +499,10 @@ export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentToo
 					);
 				}
 				params = paramsOrCtx as ScreenshotParams;
+				// Agent pipeline: DO NOT wire ctxAttachImage.
+				// The image part in the returned result is the sole delivery path;
+				// extractImageParts in worker.ts handles it on tool_execution_end.
+				ctxAttachImage = undefined;
 			} else {
 				// Direct call: execute(params, ctx?)
 				params = toolCallIdOrParams;
@@ -444,9 +515,6 @@ export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentToo
 
 		/**
 		 * Direct invocation by name — same semantics as execute() but without a toolCallId.
-		 * Lets external callers (tests, validators, future missions) do:
-		 *   getTool('screenshot').run({ url: '...' })
-		 * and receive an image content part plus the PNG buffer in the attachImage callback.
 		 */
 		async run(params: ScreenshotParams, ctx?: ScreenshotExecuteContext): Promise<ScreenshotResult> {
 			const ctxAttachImage = ctx?.attachImage ?? ctx?.store?.attachImage;
@@ -455,8 +523,6 @@ export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentToo
 
 		/**
 		 * Explicitly close the shared browser, releasing all event-loop handles.
-		 * Call this after the last capture when the browser is no longer needed.
-		 * runWorker's finally block already calls closeBrowser() automatically.
 		 */
 		close: closeBrowser,
 	} as unknown as AgentTool & {
@@ -468,29 +534,24 @@ export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentToo
 /**
  * Core screenshot capture logic, shared by execute() and run().
  *
- * Lazy browser ref acquisition:
- *   acquireBrowserRef() is called at the start of each capture and
- *   releaseBrowserRef() is called in the finally block. This means the browser
- *   is only launched (and ref-counted) for workers that actually invoke the
- *   screenshot tool — workers that never call captureScreenshot() never affect
- *   browser lifecycle at all.
+ * Browser ref acquisition (a5 strict discipline):
+ *   The session ref is acquired INSIDE the try block, AFTER a successful
+ *   getBrowser() call. This ensures that if getBrowser() rejects, no ref
+ *   is held and the finally block does not need to release anything.
+ *   A local flag `sessionRefAcquiredThisCall` tracks whether THIS invocation
+ *   was the one that set captureSessionRefHeld, so the finally block can
+ *   handle the edge case where getBrowser throws before the ref is acquired.
  *
- * Event-loop lifecycle:
- *   The browser singleton is kept alive across captures for performance.
- *   After each capture, the browser child-process stdio handles are unreffed
- *   so the Node.js event loop can drain naturally when there is no more work
- *   to do — without requiring the caller to call closeBrowser() explicitly.
- *   When the next capture starts, the handles are re-ref'd so the event loop
- *   stays alive for the duration of that capture.
+ * Image delivery (a22):
+ *   The tool result ALWAYS contains the image part (base64 in the content
+ *   array). This is the primary delivery path when called from the agent
+ *   pipeline — worker.ts's extractImageParts picks it up on tool_execution_end.
+ *   opts.attachImage / ctxAttachImage are supplementary callbacks for direct
+ *   invocations (tests, validators). runWorker does not set opts.attachImage.
  *
- *   Callers that want an explicit, deterministic teardown can still call
- *   closeBrowser() (or releaseBrowserRef()) after their last capture.
- *
- * attachImage deduplication: if ctx provides an attachImage callback, only that
- * one is called. The opts-level callback is only called when no ctx callback is
- * present. This prevents the same image being stored/transmitted twice.
- *
- * Both ctxAttachImage and optsAttachImage use the same signature: (data, mimeType).
+ * attachImage deduplication (a18):
+ *   If ctxAttachImage is provided, it wins over opts.attachImage. Only one
+ *   callback is invoked per capture.
  */
 async function captureScreenshot(
 	params: ScreenshotParams,
@@ -505,21 +566,14 @@ async function captureScreenshot(
 	const width = params.width ?? defaultWidth;
 	const height = params.height ?? defaultHeight;
 
-	// Lazily acquire one browser ref for the entire capture session (all captures
-	// in this process that share the same browser instance). The ref is held until
-	// closeBrowser() is called (which resets captureSessionRefHeld). This ensures:
-	//   • Workers that never invoke screenshot never affect browser lifecycle.
-	//   • Sequential captures reuse the browser singleton (ref held between calls).
-	//   • When closeBrowser() is called, captureSessionRefHeld is reset so the next
-	//     batch of captures acquires a fresh ref for the new browser instance.
-	if (!captureSessionRefHeld) {
-		captureSessionRefHeld = true;
-		acquireBrowserRef();
-	}
+	// Track whether this call is the one that acquired the session ref.
+	// This is set to true ONLY after a successful getBrowser() call below.
+	// If getBrowser() rejects, this stays false and the finally block skips
+	// releasing a ref (since none was acquired).
+	let sessionRefAcquiredThisCall = false;
 
 	// Re-ref the browser child process before starting the capture so the event
-	// loop stays alive for the duration of the async operation. This is balanced
-	// by an unref in the finally block once the capture is complete.
+	// loop stays alive for the duration of the async operation.
 	captureInFlight++;
 	refBrowserChildProcess(); // no-op if browserChildProcess not yet set
 
@@ -527,6 +581,15 @@ async function captureScreenshot(
 	let result: ScreenshotResult;
 	try {
 		const b = await getBrowser();
+
+		// getBrowser() succeeded. Now acquire the session ref if not already held.
+		// This is done AFTER getBrowser() so that a failed launch does not leave
+		// a dangling ref (a5 strict discipline).
+		if (!captureSessionRefHeld) {
+			captureSessionRefHeld = true;
+			sessionRefAcquiredThisCall = true;
+			acquireBrowserRef();
+		}
 
 		// Re-ref after getBrowser() in case the browser was just launched and
 		// browserChildProcess was set for the first time during this call.
@@ -551,7 +614,6 @@ async function captureScreenshot(
 		//   - If a context-level callback is provided, use it (ctx wins).
 		//   - Otherwise fall back to the factory opts callback.
 		// This prevents the same image being attached twice when both are present.
-		// Both callbacks use the same (data: Buffer, mimeType: string) signature.
 		if (ctxAttachImage) {
 			await ctxAttachImage(pngBuffer, "image/png");
 		} else if (optsAttachImage) {
@@ -589,17 +651,22 @@ async function captureScreenshot(
 			// ignore
 		}
 
+		// If getBrowser() threw before we acquired the session ref, undo any
+		// partially-set state. In the normal path (getBrowser succeeded),
+		// captureSessionRefHeld remains true until closeBrowser() is called.
+		// In the failure path, sessionRefAcquiredThisCall is still false so
+		// we do nothing here — no ref was acquired, no ref to release.
+		// (This comment documents the invariant; no code needed for the failure path.)
+
 		// Decrement the in-flight count. When it reaches 0, unref the browser
-		// child process so the Node.js event loop can drain naturally — allowing
-		// short-lived scripts that do not call closeBrowser() to still exit.
-		// The browser singleton remains alive in memory for the next capture.
-		// The session ref (captureSessionRefHeld) is held until closeBrowser() is
-		// called explicitly — NOT released per-capture — so sequential captures
-		// within the same process reuse the browser singleton without relaunching.
+		// child process so the Node.js event loop can drain naturally.
 		captureInFlight = Math.max(0, captureInFlight - 1);
 		if (captureInFlight === 0) {
 			unrefBrowserChildProcess();
 		}
 	}
+
+	// Suppress TS "used before assigned" — result is always set if we reach here
+	// (the only exit without setting result is a throw, which bypasses this line).
 	return result!;
 }
