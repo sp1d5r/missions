@@ -257,6 +257,7 @@ export function MissionTimeline({
 	const [acting, setActing] = useState<"clear" | "merge" | null>(null);
 	const [wasCleared, setWasCleared] = useState(cleared);
 	const [note, setNote] = useState<string | null>(null);
+	const [atBottom, setAtBottom] = useState(true);
 	const endRef = useRef<HTMLDivElement>(null);
 
 	useEffect(() => {
@@ -292,6 +293,25 @@ export function MissionTimeline({
 	useEffect(() => {
 		if (loaded) endRef.current?.scrollIntoView({ block: "end" });
 	}, [merged.length, loaded]);
+
+	// The composer sticks to the bottom of .mission-live-col, but the thread itself can be long —
+	// scroll up to reread an earlier attempt and there is no way back down short of dragging the
+	// scrollbar. Watch that column's own scroll position and offer a jump back once you've left it.
+	useEffect(() => {
+		const host = endRef.current?.closest<HTMLElement>(".mission-live-col");
+		if (!host) return;
+		const onScroll = () => {
+			const gap = host.scrollHeight - host.scrollTop - host.clientHeight;
+			setAtBottom(gap < 32);
+		};
+		onScroll();
+		host.addEventListener("scroll", onScroll, { passive: true });
+		return () => host.removeEventListener("scroll", onScroll);
+	}, [loaded]);
+
+	const scrollToLatest = useCallback(() => {
+		endRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
+	}, []);
 
 	const ask = useCallback(async () => {
 		const text = draft.trim();
@@ -478,8 +498,19 @@ export function MissionTimeline({
 				</div>
 			)}
 
+			{!canMutate && !atBottom && (
+				<button type="button" className="scroll-latest scroll-latest-standalone" onClick={scrollToLatest}>
+					↓ jump to latest
+				</button>
+			)}
+
 			{canMutate && (
 				<div className="chat-composer">
+					{!atBottom && (
+						<button type="button" className="scroll-latest" onClick={scrollToLatest}>
+							↓ jump to latest
+						</button>
+					)}
 					<textarea
 						value={draft}
 						onChange={(e) => setDraft(e.target.value)}

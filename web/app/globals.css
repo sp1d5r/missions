@@ -346,6 +346,12 @@ textarea { resize: vertical; min-height: 76px; }
 .mission-overview {
   border-right: 1px solid var(--hairline);
 }
+/* The sticky composer's "bottom: 0" is measured against this column's own padding edge — a
+ * bottom padding here would leave it stranded that far short of the column's true bottom,
+ * a gap the composer's own padding (below) is already responsible for. */
+.mission-live-col {
+  padding-bottom: 0;
+}
 
 .composer {
   flex: 0 0 auto;
@@ -589,6 +595,22 @@ textarea { resize: vertical; min-height: 76px; }
   border-top: 1px solid var(--hairline);
   padding: 10px 0 calc(10px + env(safe-area-inset-bottom));
   margin-top: 10px;
+}
+/* Floats above the composer's own top edge — .chat-composer's sticky already gives it a
+ * positioning context, so this rides along as the composer sticks, instead of needing its
+ * own scroll math. */
+.scroll-latest {
+  position: absolute; bottom: 100%; right: 0;
+  margin-bottom: 8px;
+  padding: 5px 10px; font-size: 10px; letter-spacing: .02em;
+  background: var(--panel-raised); border: 1px solid var(--hairline-bright);
+  color: var(--text-dim); border-radius: 3px; cursor: pointer;
+}
+.scroll-latest:hover { color: var(--text); }
+/* No composer to ride along with (read-only viewers) — sticks to the column bottom itself. */
+.scroll-latest-standalone {
+  position: sticky; bottom: 10px; float: right;
+  margin-top: 8px;
 }
 /* Act on the left, ask on the right — opposite ends, so a mis-tap cannot merge
    a branch you meant to ask a question about. */
