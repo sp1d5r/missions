@@ -10,6 +10,7 @@
  */
 
 import { type Browser } from "playwright";
+import { createRequire } from "module";
 import { Type, type AgentTool } from "../../pi.js";
 
 // ---------------------------------------------------------------------------
@@ -22,6 +23,65 @@ let browserLaunchCount = 0;
 
 /** Reference count for concurrent workers sharing the browser singleton. */
 let browserRefCount = 0;
+
+/**
+ * The spawned Playwright browser child process.
+ * Tracked so we can unref/ref its handles to let the Node event loop drain
+ * naturally when no captures are in-flight, without calling browser.close().
+ * This is what allows validator commands that do not call closeBrowser() to
+ * still exit instead of hanging indefinitely on the browser's stdio pipes.
+ */
+let browserChildProcess: import("child_process").ChildProcess | undefined;
+
+/**
+ * Number of screenshot captures currently in-flight.
+ * When this drops to 0 we unref the browser process so the event loop can
+ * drain; when it rises above 0 we ref it back so the capture can complete.
+ */
+let captureInFlight = 0;
+
+/** Unref the browser child process so Node can exit without b.close(). */
+function unrefBrowserChildProcess(): void {
+	const proc = browserChildProcess;
+	if (!proc || proc.exitCode !== null) return;
+	try {
+		proc.unref();
+	} catch { /* ignore */ }
+	for (const stream of (proc.stdio ?? [])) {
+		if (!stream) continue;
+		try { (stream as unknown as { unref?: () => void }).unref?.(); } catch { /* ignore */ }
+		try {
+			// Socket._handle.unref() is what actually releases the libuv handle.
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			(stream as any)._handle?.unref?.();
+		} catch { /* ignore */ }
+	}
+	try {
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		(proc as any)._handle?.unref?.();
+	} catch { /* ignore */ }
+}
+
+/** Re-ref the browser child process so an in-flight capture keeps Node alive. */
+function refBrowserChildProcess(): void {
+	const proc = browserChildProcess;
+	if (!proc || proc.exitCode !== null) return;
+	try {
+		proc.ref();
+	} catch { /* ignore */ }
+	for (const stream of (proc.stdio ?? [])) {
+		if (!stream) continue;
+		try { (stream as unknown as { ref?: () => void }).ref?.(); } catch { /* ignore */ }
+		try {
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			(stream as any)._handle?.ref?.();
+		} catch { /* ignore */ }
+	}
+	try {
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		(proc as any)._handle?.ref?.();
+	} catch { /* ignore */ }
+}
 
 /**
  * Returns how many times the browser was launched in this process.
@@ -123,7 +183,29 @@ async function getBrowser(): Promise<Browser> {
 		// Dynamic import so the module loads even when playwright is not installed.
 		const { chromium } = await import("playwright");
 
+		// Intercept child_process.spawn to capture the browser child process.
+		// This lets us unref/ref its stdio handles so the Node.js event loop can
+		// drain naturally when no captures are in-flight — even if the caller
+		// never calls closeBrowser().
+		const _require = createRequire(import.meta.url);
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const childProcess = _require("child_process") as typeof import("child_process");
+		const originalSpawn = childProcess.spawn.bind(childProcess);
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		(childProcess as any).spawn = function (cmd: string, args?: readonly string[], opts?: import("child_process").SpawnOptions) {
+			const proc = originalSpawn(cmd, args as string[], opts ?? {});
+			if (typeof cmd === "string" && cmd.includes("chrom")) {
+				browserChildProcess = proc;
+			}
+			return proc;
+		};
+
 		const b = await chromium.launch({ headless: true });
+
+		// Restore spawn so we don't permanently patch child_process.
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		(childProcess as any).spawn = originalSpawn;
+
 		browser = b;
 		browserLaunchCount++;
 		return b;
@@ -331,9 +413,14 @@ export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentToo
  *
  * Event-loop lifecycle:
  *   The browser singleton is kept alive across captures for performance.
- *   The caller (runWorker's finally block) is responsible for calling
- *   closeBrowser() once all captures are done so the Playwright child-process
- *   handles are released and the Node.js event loop can drain.
+ *   After each capture, the browser child-process stdio handles are unreffed
+ *   so the Node.js event loop can drain naturally when there is no more work
+ *   to do — without requiring the caller to call closeBrowser() explicitly.
+ *   When the next capture starts, the handles are re-ref'd so the event loop
+ *   stays alive for the duration of that capture.
+ *
+ *   Callers that want an explicit, deterministic teardown can still call
+ *   closeBrowser() (or releaseBrowserRef()) after their last capture.
  *
  * attachImage deduplication: if ctx provides an attachImage callback, only that
  * one is called. The opts-level callback is only called when no ctx callback is
@@ -354,7 +441,17 @@ async function captureScreenshot(
 	const width = params.width ?? defaultWidth;
 	const height = params.height ?? defaultHeight;
 
+	// Re-ref the browser child process before starting the capture so the event
+	// loop stays alive for the duration of the async operation. This is balanced
+	// by an unref in the finally block once the capture is complete.
+	captureInFlight++;
+	refBrowserChildProcess(); // no-op if browserChildProcess not yet set
+
 	const b = await getBrowser();
+
+	// Re-ref after getBrowser() in case the browser was just launched and
+	// browserChildProcess was set for the first time during this call.
+	refBrowserChildProcess();
 
 	let context: Awaited<ReturnType<Browser["newContext"]>> | undefined;
 	let result: ScreenshotResult;
@@ -415,10 +512,15 @@ async function captureScreenshot(
 		} catch {
 			// ignore
 		}
-		// The browser singleton is intentionally kept alive across captures so it
-		// can be reused within the same process (performance). The caller is
-		// responsible for closing it via closeBrowser() (e.g. runWorker's finally
-		// block in worker.ts already does this).
+
+		// Decrement the in-flight count. When it reaches 0, unref the browser
+		// child process so the Node.js event loop can drain naturally — allowing
+		// short-lived scripts that do not call closeBrowser() to still exit.
+		// The browser singleton remains alive in memory for the next capture.
+		captureInFlight = Math.max(0, captureInFlight - 1);
+		if (captureInFlight === 0) {
+			unrefBrowserChildProcess();
+		}
 	}
 	return result!;
 }
