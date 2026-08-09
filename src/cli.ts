@@ -479,6 +479,7 @@ async function main(): Promise<void> {
 		const opts: import("./mission.js").ResumeMissionOpts = {};
 		if (f.budget !== undefined) opts.budget = f.budget; // uncapped unless explicitly asked for
 		if (f.maxMilestones !== 3) opts.maxMilestones = f.maxMilestones; // only set if explicitly passed
+		if (f.mode !== undefined) opts.mode = f.mode; // --fast/--rigorous; state never persists the original run's mode
 
 		process.stdout.write(`${chalk.bold("resume")} → ${chalk.dim(outDir)}\n\n`);
 		const state = await resumeMission(outDir, opts, (e) => {
