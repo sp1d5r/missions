@@ -48,7 +48,7 @@ check("quoted cd to an unknown var is still flagged — it fails loudly, but it'
 });
 
 check("the aliased worktree names are all safe", () => {
-	for (const name of ["WORKTREE", "MISSION_WORKTREE", "REPO", "MISSION_ID"]) {
+	for (const name of ["WORKTREE", "MISSION_WORKTREE", "MISSION_DIR", "REPO", "MISSION_ID"]) {
 		assert(detectUnsafeCdVar(`cd "$${name}" && npm test`) === null, `$${name} should be considered safe`);
 		assert(detectUnsafeCdVar(`cd $${name} && npm test`) === null, `unquoted $${name} should be considered safe`);
 	}
@@ -90,6 +90,7 @@ check("resolveMissionEnv sets the aliases assertions actually reference", () => 
 	});
 	assert(env.WORKTREE === "/repo/.missions/worktrees/m1", `WORKTREE: ${env.WORKTREE}`);
 	assert(env.MISSION_WORKTREE === "/repo/.missions/worktrees/m1", `MISSION_WORKTREE: ${env.MISSION_WORKTREE}`);
+	assert(env.MISSION_DIR === "/repo/.missions/worktrees/m1", `MISSION_DIR: ${env.MISSION_DIR}`);
 	assert(env.REPO === "/repo/.missions/worktrees/m1", `REPO: ${env.REPO}`);
 	assert(env.MISSION_ID === "m-123", `MISSION_ID: ${env.MISSION_ID}`);
 	assert(env.MISSIONS_WORKTREE === env.WORKTREE, "alias must match the original marker");

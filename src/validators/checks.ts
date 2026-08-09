@@ -50,7 +50,7 @@ export const REFUSED_EXIT_CODE = 126;
 
 /** Env vars resolveMissionEnv guarantees. A `cd $VAR` outside this set is a guess. */
 const KNOWN_SAFE_CD_VARS = new Set([
-	"WORKTREE", "MISSION_WORKTREE", "REPO", "MISSION_ID",
+	"WORKTREE", "MISSION_WORKTREE", "MISSION_DIR", "REPO", "MISSION_ID",
 	"MISSIONS_WORKTREE", "MISSIONS_TARGET_REPO", "MISSIONS_MISSION_ID",
 	"HOME", "PWD", "OLDPWD",
 ]);
