@@ -13,8 +13,13 @@ export interface FileThrash {
 
 /** Below this, ordinary iteration. At/above it, warn the orchestrator in the boundary prompt. */
 export const THRASH_WARN_THRESHOLD = 3;
-/** At/above it, the harness stalls instead of scoping another correction — a human decides. */
-export const THRASH_STALL_THRESHOLD = 5;
+/**
+ * At/above it, tell the orchestrator this is no longer optional: consolidate into one redesign
+ * correction or stall itself. Not a harness-enforced stop — maxMilestones/budget already are the
+ * enforced ceiling (see MissionConfig.budgetUsd's own reasoning), and a second, per-file hard cap
+ * would just be that same mistake again, one level down.
+ */
+export const THRASH_CRITICAL_THRESHOLD = 6;
 
 /**
  * Files touched by 2+ distinct correction commits, most-touched first.
