@@ -834,8 +834,15 @@ export async function runMission(config: MissionConfig, onEvent?: (e: MissionEve
 		const wt = store.state.worktreePath;
 		if (wt && store.state.status === "failed" && !store.state.commits?.length) {
 			const got = reclaimWorktree(config.targetCwd, wt, "no-commits");
-			if (got.skipped) emit(`worktree kept: ${got.skipped}`);
-			else emit(`worktree reclaimed (${humanBytes(got.bytes)}) — no commits to preserve`);
+			if (got.skipped) {
+				emit(`worktree kept: ${got.skipped}`);
+			} else {
+				// The directory is gone — clear the pointer before the emit below republishes
+				// the ActiveRecord, or the board keeps offering to open a deleted path.
+				store.state.worktreePath = undefined;
+				store.save();
+				emit(`worktree reclaimed (${humanBytes(got.bytes)}) — no commits to preserve`);
+			}
 		}
 	}
 
