@@ -582,6 +582,37 @@ textarea { resize: vertical; min-height: 76px; }
 .scoping-thread-actions button { background: none; border: 1px solid var(--hairline-bright); color: var(--text-dim); font: inherit; font-size: 10px; padding: 3px 7px; cursor: pointer; }
 .scoping-thread-actions button:hover { border-color: var(--live); color: var(--live); }
 
+/* ideas board — the Linear-style status board for anything not yet a mission. See ideas-board.tsx. */
+.ideas-composer { margin: 4px 0 18px; }
+.ideas-columns { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; align-items: start; }
+.ideas-column {
+  border: 1px solid var(--hairline); background: var(--panel-raised); min-height: 120px;
+  display: flex; flex-direction: column;
+}
+.ideas-column.drag-over { border-color: var(--live); }
+.ideas-column-head {
+  display: flex; justify-content: space-between; align-items: center; padding: 8px 10px;
+  border-bottom: 1px solid var(--hairline); font-size: 10px; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--text-dim);
+}
+.ideas-column-body { padding: 8px; display: flex; flex-direction: column; gap: 8px; min-height: 60px; }
+.ideas-empty { font-size: 11px; padding: 4px 2px; }
+.idea-card {
+  position: relative; border: 1px solid var(--hairline); background: var(--panel); padding: 8px 24px 8px 9px;
+  cursor: grab;
+}
+.idea-card:active { cursor: grabbing; }
+.idea-title { font-size: 12.5px; color: var(--text); line-height: 1.4; }
+.idea-desc { font-size: 11px; color: var(--text-dim); margin-top: 4px; line-height: 1.4; }
+.idea-remove {
+  position: absolute; top: 4px; right: 4px; appearance: none; background: none; border: none;
+  color: var(--text-faint); font-size: 13px; line-height: 1; cursor: pointer; padding: 2px 5px;
+}
+.idea-remove:hover { color: var(--bad); }
+@media (max-width: 720px) {
+  .ideas-columns { grid-template-columns: 1fr; }
+}
+
 .diagram { margin: 0 0 16px; }
 .diagram figcaption { margin-bottom: 6px; }
 .canvas { overflow-x: auto; }

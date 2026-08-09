@@ -72,6 +72,12 @@ export function ChanList({ items }: { items: ChanItem[] }) {
 				<span className="chan-meta" />
 				<span className="chan-goal">start a mission</span>
 			</Link>
+			<Link className="chan" href="/ideas" data-active={path === "/ideas"}>
+				<span className="chan-dot" style={{ color: "var(--text-faint)" }} />
+				<span className="chan-name">ideas</span>
+				<span className="chan-meta" />
+				<span className="chan-goal">everything not yet a mission</span>
+			</Link>
 
 			<Section title={`Needs you (${needsYou.length})`} items={needsYou} path={path} />
 			<Section title={`Running (${running.length})`} items={running} path={path} />
