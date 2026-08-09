@@ -1,4 +1,5 @@
 import { complete, parseJson } from "./llm.js";
+import { THRASH_WARN_THRESHOLD, type FileThrash } from "./thrash.js";
 import type { Assertion, AssertionStrength, Feature, Handoff, IssueDisposition, MissionConfig, Plan, ScoreCard } from "./types.js";
 
 const SYSTEM_PROMPT = `You are the ORCHESTRATOR of an autonomous engineering org working on a target code repository.
@@ -12,10 +13,14 @@ Principles:
   - "bash-command": a shell command in the repo whose exit code proves the assertion (tests, typecheck, a grep).
   - "code-review": a focused thing an adversarial reviewer must confirm by reading the diff.
   - "behavioral": only when a concrete end-to-end scenario clearly applies (the target adapter runs it).
-- Every "bash-command" assertion runs with its working directory set to the MISSION WORKTREE — an isolated
-  checkout that is not the path the repo normally lives at. So: use RELATIVE paths only, and never \`cd\` to an
-  absolute path. A command that reaches outside the worktree is refused by the harness and the assertion fails,
-  because it would prove something about a different checkout than the one the work happened in.
+- Every "bash-command" assertion already runs with its working directory SET to the MISSION WORKTREE — an
+  isolated checkout that is not the path the repo normally lives at. Do NOT \`cd\` into it; the command starts
+  there. Use RELATIVE paths only, and never \`cd\` to an absolute path. A command that reaches outside the
+  worktree is refused by the harness and the assertion fails, because it would prove something about a
+  different checkout than the one the work happened in.
+- If a command genuinely needs the worktree path or mission id as a variable (e.g. to pass to a subprocess),
+  the harness sets $MISSION_WORKTREE and $MISSION_ID. Do not invent other names ($WORKTREE, $REPO, $RUN_ID,
+  $ID, etc.) — an assertion referencing an unset var is refused, or silently \`cd\`s to the wrong place.
 - Every feature maps to one or more assertion ids; every assertion is covered by at least one feature.
 - "procedures" are per-feature working rules for the worker (what to run, what to leave alone, what to check
   before finishing). The worker reports whether it followed them. Use them where a feature has a sharp edge.
@@ -25,7 +30,7 @@ Every assertion MUST carry a "strength" field — this is required for the verdi
 The three allowed values and their exact semantics:
 - "behavioural": the command actually EXECUTES the feature (calls the code, runs the binary, exercises real
   logic). Only a passing behavioural assertion suppresses the existence-only warning in the final verdict.
-  Example: node dist/cli.js view "$RUN_ID" --json | jq -e '.timeline | length > 0'
+  Example: node dist/cli.js view "$MISSION_ID" --json | jq -e '.timeline | length > 0'
 - "existence": the command only inspects the filesystem without executing the feature (file present, symbol
   exported, pattern grep'd). Does NOT suppress the existence-only warning on its own.
   Example: test -f src/mission-view.ts && grep -q 'export' src/mission-view.ts
@@ -122,7 +127,7 @@ ${doctrineText}
 REPO RECON (top-level structure + signals):
 ${repoSummary}
 
-Produce the plan + validation contract now. At most ${config.maxFeatures} feature(s) will be executed per milestone, so order them by leverage.`;
+Produce the plan + validation contract now. ${featureCapLine(config.maxFeatures)}`;
 
 	const { text, costUsd } = await complete(config.routing.orchestrator, SYSTEM_PROMPT, userPrompt);
 	const parsed = parseJson<Plan>(text);
@@ -182,6 +187,11 @@ You are given: the contract and its per-assertion results, the adversarial revie
 worker's structured handoff (what it completed, what it left undone, what it actually ran with exit codes,
 and what issues it discovered).
 
+Reminder for any new bash-command assertion you write (this has broken real missions): cwd is already the
+worktree, so never \`cd\` into it or to an absolute path. If you need the path or mission id as a variable,
+the only guaranteed names are $MISSION_WORKTREE and $MISSION_ID — inventing another name ($WORKTREE, $ID,
+$RUN_ID, ...) gets refused or silently cds to the wrong place.
+
 Your job:
 1. ASSESS. What is the real state of the work? Where a worker CLAIMED an assertion the validators failed,
    say so plainly — that gap is the most important signal you have.
@@ -199,6 +209,12 @@ Your job:
 3. SCOPE CORRECTIONS. Write corrective features for the next milestone, each small enough for one fresh
    worker with clean context. Target the failing assertions, the blocking bugs, and the issues you marked
    "addressed".
+
+   If you are given a FILE THRASH WARNING below, narrow patches on that file have already been fighting
+   each other across several corrections — fixing one thing and re-breaking another. Do not scope another
+   narrow patch against it. Either scope ONE correction that redesigns the component against the FULL set
+   of constraints those prior corrections were each trying to satisfy in isolation, or, if that is not
+   something a single worker can do with confidence, return verdict "stalled" and say why in "assessment".
 
 4. STRENGTHEN THE CONTRACT. This is the step that matters most, and it is only possible now.
 
@@ -249,7 +265,7 @@ Output ONLY a JSON object, no prose:
   "newAssertions": [
     { "id": "a7", "statement": "observable claim that must hold", "strength": "behavioural",
       "justification": "which part of the goal/RFC this makes checkable",
-      "method": { "type": "bash-command", "command": "node dist/cli.js view $ID --json | jq -e '.timeline|length>0'", "expectedExitCode": 0 } }
+      "method": { "type": "bash-command", "command": "node dist/cli.js view $MISSION_ID --json | jq -e '.timeline|length>0'", "expectedExitCode": 0 } }
   ],
   "corrections": [
     { "id": "c1", "title": "short", "description": "what to change and where, precisely",
@@ -289,6 +305,8 @@ export interface ScopeCorrectionsOptions {
 	/** Remaining spend under the cap, or Infinity when the mission is uncapped (the default). */
 	remainingUsd: number;
 	milestonesLeft: number;
+	/** Files repeatedly touched by prior corrections — see THRASH_WARN_THRESHOLD in thrash.ts. */
+	fileThrash?: FileThrash[];
 }
 
 /**
@@ -300,6 +318,13 @@ export interface ScopeCorrectionsOptions {
  */
 export function budgetLine(remainingUsd: number): string {
 	return Number.isFinite(remainingUsd) ? `Budget remaining: $${remainingUsd.toFixed(2)}. ` : "";
+}
+
+/** Mirrors budgetLine: uncapped is the normal case, so say nothing rather than "at most undefined". */
+export function featureCapLine(maxFeatures: number | undefined): string {
+	return maxFeatures === undefined
+		? "No fixed limit on how many independent, small, single-purpose corrections you scope — just don't batch unrelated fixes into one."
+		: `At most ${maxFeatures} will be executed, so order them by leverage.`;
 }
 
 /**
@@ -345,7 +370,7 @@ export function parseIssueRulings(rawRulings: unknown[], idMap: Map<string, stri
 }
 
 export async function scopeCorrections(options: ScopeCorrectionsOptions): Promise<MilestoneReview> {
-	const { config, milestone, assertions, scoreCard, handoffs, remainingUsd, milestonesLeft } = options;
+	const { config, milestone, assertions, scoreCard, handoffs, remainingUsd, milestonesLeft, fileThrash } = options;
 
 	const assertionLines = assertions
 		.map((a) => `- (${a.id}) [${a.passed ? "PASS" : "FAIL"}] ${a.statement}${a.evidence ? `\n    evidence: ${a.evidence}` : ""}`)
@@ -377,6 +402,11 @@ export async function scopeCorrections(options: ScopeCorrectionsOptions): Promis
 	const openIssues = handoffs.flatMap((h) => h.issues.filter((i) => !i.disposition));
 	const openIssueLines = openIssues.length ? openIssues.map((i) => `- ${i.summary}`).join("\n") : "(none)";
 
+	const warnedThrash = (fileThrash ?? []).filter((t) => t.correctionIds.length >= THRASH_WARN_THRESHOLD);
+	const thrashBlock = warnedThrash.length
+		? `\nFILE THRASH WARNING (see instructions above):\n${warnedThrash.map((t) => `- ${t.file}: touched by ${t.correctionIds.length} corrections so far (${t.correctionIds.join(", ")})`).join("\n")}\n`
+		: "";
+
 	const userPrompt = `GOAL:
 ${config.goal}
 
@@ -397,8 +427,8 @@ ${handoffLines}
 
 OPEN ISSUES YOU MUST RULE ON (every one needs a disposition):
 ${openIssueLines}
-
-Assess, rule on the issues, and scope corrections now. At most ${config.maxFeatures} correction(s) will be executed next milestone, so order them by leverage.`;
+${thrashBlock}
+Assess, rule on the issues, and scope corrections now. ${featureCapLine(config.maxFeatures)}`;
 
 	const { text, costUsd } = await complete(config.routing.orchestrator, CORRECTION_PROMPT, userPrompt);
 	const parsed = parseJson<{

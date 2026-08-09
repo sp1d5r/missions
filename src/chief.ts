@@ -56,7 +56,7 @@ function userMsg(text: string): AgentMessage {
 	return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() } as AgentMessage;
 }
 
-function configFor(targetCwd: string, goal: string, rfc: string, maxFeatures: number, mode?: "fast" | "rigorous"): MissionConfig {
+function configFor(targetCwd: string, goal: string, rfc: string, maxFeatures: number | undefined, mode?: "fast" | "rigorous"): MissionConfig {
 	const runId = `run-${new Date().toISOString().replace(/[:.]/g, "-")}`;
 	return {
 		goal,
@@ -84,7 +84,7 @@ interface Job {
 	repo: string;
 	goal: string;
 	rfc: string;
-	maxFeatures: number;
+	maxFeatures: number | undefined;
 	mode?: "fast" | "rigorous";
 }
 
@@ -194,7 +194,7 @@ export function buildTools(
 		parameters: Type.Object({
 			goal: Type.String({ description: "One-line goal." }),
 			rfc: Type.Optional(Type.String({ description: "Optional detail: what's wrong / what you want." })),
-			maxFeatures: Type.Optional(Type.Number({ description: "Features this run (default 1)." })),
+			maxFeatures: Type.Optional(Type.Number({ description: "Cap on features/corrections queued per milestone. Default: uncapped." })),
 			mode: Type.Optional(
 				Type.Union([Type.Literal("fast"), Type.Literal("rigorous")], {
 					description:
@@ -212,7 +212,7 @@ export function buildTools(
 				repo: ws.path,
 				goal: params.goal,
 				rfc: params.rfc ?? "",
-				maxFeatures: params.maxFeatures ?? 1,
+				maxFeatures: params.maxFeatures,
 				mode: params.mode,
 			});
 			const text = startedNow
@@ -574,7 +574,7 @@ export function createChiefSession(homeCwd: string): ChiefSession {
 		},
 		dispatchMission(repo: string, goal: string, rfc?: string) {
 			registerWorkspace(repo);
-			runnerRef.enqueue({ repo, goal, rfc: rfc ?? "", maxFeatures: 1 });
+			runnerRef.enqueue({ repo, goal, rfc: rfc ?? "", maxFeatures: undefined });
 		},
 		subscribe(cb) {
 			listeners.add(cb);

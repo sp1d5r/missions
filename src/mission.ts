@@ -4,9 +4,10 @@ import { applyEnvOverrides, bootstrapWorktree } from "./bootstrap.js";
 import { provisionDbBranch } from "./db-branch.js";
 import { resolveMissionEnv } from "./env.js";
 import { allocatePortBlock, assignPorts } from "./ports.js";
-import { addWorktree, commitAll, diffAgainst, ensureBranch, headSha, isGitRepo } from "./git.js";
+import { addWorktree, commitAll, diffAgainst, ensureBranch, filesChangedInCommit, headSha, isGitRepo } from "./git.js";
 import { blocking, checkBoundary, checkContractRatchet, checkPlan, formatViolations, warnings } from "./invariants.js";
 import { decideStallOrRetry } from "./stall.js";
+import { detectFileThrash, THRASH_STALL_THRESHOLD } from "./thrash.js";
 import { humanBytes, reclaimWorktree } from "./lifecycle.js";
 import { type CorrectionRuling, planMission, scopeCorrections } from "./orchestrator.js";
 import { acquireMissionLock } from "./mission-lock.js";
@@ -174,10 +175,9 @@ async function runMilestoneLoop(ctx: MilestoneLoopContext): Promise<{ verdict: M
 		const liveThisMilestone: { workerId: string; release: () => void }[] = [];
 
 		for (const feature of queue) {
-			// Uncapped by default: `remaining` is Infinity, the break never fires, and the worker
-			// gets no ceiling to be truncated at. The loop is still bounded — maxFeatures per
-			// milestone × maxMilestones — so removing the cap does not make it unbounded, it just
-			// stops a dollar figure from deciding where a worker gets cut off.
+			// Uncapped by default: `remaining` is Infinity and this break never fires. Still bounded
+			// by maxMilestones (and maxFeatures, when someone sets it) — this just stops a dollar
+			// figure from deciding where a worker gets cut off.
 			const remaining = config.budgetUsd === undefined ? Number.POSITIVE_INFINITY : config.budgetUsd - store.state.costUsd;
 			if (remaining <= 0) {
 				emit("budget exhausted — stopping before next feature");
@@ -335,12 +335,30 @@ async function runMilestoneLoop(ctx: MilestoneLoopContext): Promise<{ verdict: M
 			break;
 		}
 
+		const fileThrash = detectFileThrash(store.state.commits, store.state.features, (sha) => filesChangedInCommit(workCwd, sha));
+		const hardThrash = fileThrash.filter((t) => t.correctionIds.length >= THRASH_STALL_THRESHOLD);
+		if (hardThrash.length) {
+			const detail = hardThrash.map((t) => `${t.file} (${t.correctionIds.length} corrections: ${t.correctionIds.join(", ")})`).join("; ");
+			const rawReason = `${hardThrash.length} file(s) have absorbed ${THRASH_STALL_THRESHOLD}+ corrections without the mission converging — narrow fixes are fighting each other: ${detail}. Needs a human to decide whether the component needs a redesign.`;
+			const fullReason = finalizeStall(store.state, rawReason, m, failing.map((a) => a.id));
+			verdict = "stalled";
+			record.verdict = verdict;
+			record.assessment = `[harness] thrash escalation: ${detail}`;
+			store.state.milestones.push(record);
+			store.save();
+			emit(`milestone ${m}: STALLED — thrash escalation — needs you: ${fullReason}`);
+			store.appendEvent("milestone_verdict", `milestone ${m}: STALLED (thrash)`, fullReason, { seat: "lead" });
+			await offerRescue(liveThisMilestone, workCwd, gitExcludes, store, emit, config.rescueWaitMs);
+			break;
+		}
+
 		emit(`milestone ${m}: ${failing.length} failing${pendingAssertions.length > 0 ? `, ${pendingAssertions.length} pending` : ""}, ${blockingBugs.length} blocking bug(s), ${openIssues.length} open issue(s) — orchestrator triaging…`);
 		const review = await scopeCorrections({
 			config,
 			milestone: m,
 			assertions: plan.contract.assertions,
 			scoreCard,
+			fileThrash,
 			handoffs,
 			remainingUsd,
 			milestonesLeft: ctx.maxMilestones - m,
@@ -368,8 +386,9 @@ async function runMilestoneLoop(ctx: MilestoneLoopContext): Promise<{ verdict: M
 			}
 		}
 
-		const corrections = review.corrections.slice(0, config.maxFeatures);
-		const dropped = review.corrections.slice(config.maxFeatures);
+		const featureCap = config.maxFeatures;
+		const corrections = featureCap === undefined ? review.corrections : review.corrections.slice(0, featureCap);
+		const dropped = featureCap === undefined ? [] : review.corrections.slice(featureCap);
 		if (dropped.length) {
 			const reopened = reopenIssuesFor(handoffs, dropped.map((c) => c.id));
 			emit(
@@ -942,7 +961,8 @@ export async function resumeMission(
 		budgetUsd: additionalBudget === undefined ? undefined : spentSoFar + additionalBudget,
 		outDir,
 		routing: state!.routing ?? { worker: { provider: "anthropic", modelId: "claude-opus-4-5" }, orchestrator: { provider: "anthropic", modelId: "claude-opus-4-5" }, bugSpotter: { provider: "anthropic", modelId: "claude-opus-4-5" } },
-		maxFeatures: 1,
+		// MissionState never persisted the original maxFeatures; matches the CLI default (uncapped).
+		maxFeatures: undefined,
 		maxMilestones: opts.maxMilestones ?? (state!.milestones.length + 3),
 		useWorktree: false, // NEVER create a new worktree — reuse the existing one
 		target: "generic",

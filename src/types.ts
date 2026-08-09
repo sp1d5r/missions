@@ -295,8 +295,8 @@ export interface MissionConfig {
 	/** Where mission artifacts (state.json, report.html, log) are written. */
 	outDir: string;
 	routing: ModelRouting;
-	/** Max features executed per milestone. */
-	maxFeatures: number;
+	/** Max features/corrections queued per milestone. undefined = uncapped (the default). */
+	maxFeatures?: number;
 	/** Max milestones (initial pass + corrective rounds) before we stop and ask for a human. Default 3. */
 	maxMilestones?: number;
 	/** Optional repo check command run by the scrutiny validator (e.g. "npm test"). */

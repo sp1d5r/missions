@@ -164,6 +164,16 @@ export function diffOfCommit(cwd: string, sha: string): string {
 	return gitSafe(cwd, ["show", sha, "--no-color", "--format=%H%n%s%n"]).out;
 }
 
+/** Paths a commit touched, relative to repo root. Empty on a bad sha rather than throwing. */
+export function filesChangedInCommit(cwd: string, sha: string): string[] {
+	const { ok, out } = gitSafe(cwd, ["diff-tree", "--no-commit-id", "--name-only", "-r", sha]);
+	if (!ok) return [];
+	return out
+		.split("\n")
+		.map((l) => l.trim())
+		.filter(Boolean);
+}
+
 /** Diff of working tree + staged changes against a base ref. */
 export function diffAgainst(cwd: string, baseRef: string): string {
 	return gitSafe(cwd, ["diff", "--no-color", baseRef, "--", ".", ":(exclude)*.lock", ":(exclude)*-lock.json"]).out;

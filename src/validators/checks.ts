@@ -48,6 +48,31 @@ function killNewBrowserOrphans(before: Set<string>): void {
 /** Exit code we report for a command the harness refused to run. Distinct from any real failure. */
 export const REFUSED_EXIT_CODE = 126;
 
+/** Env vars resolveMissionEnv guarantees. A `cd $VAR` outside this set is a guess. */
+const KNOWN_SAFE_CD_VARS = new Set([
+	"WORKTREE", "MISSION_WORKTREE", "REPO", "MISSION_ID",
+	"MISSIONS_WORKTREE", "MISSIONS_TARGET_REPO", "MISSIONS_MISSION_ID",
+	"HOME", "PWD", "OLDPWD",
+]);
+
+/**
+ * Find a `cd` invocation whose target is an env var outside the known-safe set. Unquoted, an
+ * unset var vanishes as a token and `cd` lands in $HOME instead of failing — the rest of the
+ * command then silently runs against the wrong tree.
+ */
+export function detectUnsafeCdVar(command: string): string | null {
+	const continued = command.replace(/\\\n/g, " ");
+	const stripped = continued.replace(/'[^']*'/g, "''");
+	// Unlike commandTokens above, braces are NOT a segment delimiter here — they show up inside
+	// ${VAR} expansions, which is exactly the syntax this function needs to match.
+	const segments = stripped.split(/[;&|()\n]+/).map((s) => s.trim()).filter(Boolean);
+	for (const seg of segments) {
+		const m = seg.match(/^cd\s+"?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/);
+		if (m?.[1] && !KNOWN_SAFE_CD_VARS.has(m[1])) return m[1];
+	}
+	return null;
+}
+
 export interface RunCheckOptions {
 	/** Where the command runs — the mission's worktree. */
 	cwd: string;
@@ -81,6 +106,16 @@ export function runCheck(options: RunCheckOptions): Promise<CheckResult> {
 			exitCode: REFUSED_EXIT_CODE,
 			passed: false,
 			output: `REFUSED by the harness: this command reaches outside the mission worktree (${escape}).\nIt would validate the main checkout instead of this mission's work. Assertions must use paths relative to the worktree.`,
+		});
+	}
+
+	const badCdVar = detectUnsafeCdVar(command);
+	if (badCdVar) {
+		return Promise.resolve({
+			command,
+			exitCode: REFUSED_EXIT_CODE,
+			passed: false,
+			output: `REFUSED by the harness: this command does "cd $${badCdVar}", but $${badCdVar} is not one of the env vars the harness guarantees.\nEvery assertion already runs with cwd set to the worktree, so it does not need to cd at all. If you need the worktree path as a variable, use $MISSION_WORKTREE (aliases: $WORKTREE, $REPO). The mission id is $MISSION_ID.`,
 		});
 	}
 
