@@ -1,5 +1,5 @@
 import { complete, parseJson } from "./llm.js";
-import { THRASH_WARN_THRESHOLD, type FileThrash } from "./thrash.js";
+import { THRASH_CRITICAL_THRESHOLD, THRASH_WARN_THRESHOLD, type FileThrash } from "./thrash.js";
 import type { Assertion, AssertionStrength, Feature, Handoff, IssueDisposition, MissionConfig, Plan, ScoreCard } from "./types.js";
 
 const SYSTEM_PROMPT = `You are the ORCHESTRATOR of an autonomous engineering org working on a target code repository.
@@ -212,9 +212,14 @@ Your job:
 
    If you are given a FILE THRASH WARNING below, narrow patches on that file have already been fighting
    each other across several corrections — fixing one thing and re-breaking another. Do not scope another
-   narrow patch against it. Either scope ONE correction that redesigns the component against the FULL set
-   of constraints those prior corrections were each trying to satisfy in isolation, or, if that is not
-   something a single worker can do with confidence, return verdict "stalled" and say why in "assessment".
+   single-symptom patch against it. Instead scope ONE correction whose "assertionIds" covers every
+   currently-failing assertion that touches that file, and whose description asks the worker for a
+   coherent redesign against the FULL set of constraints those prior corrections were each trying to
+   satisfy in isolation — not another patch. A correction is not limited to one assertion; use that.
+   If marked CRITICAL, this is no longer a suggestion: scoping another single-symptom patch on that file
+   is the wrong move regardless of how small it looks. If you genuinely cannot design a fix a single
+   worker can execute with confidence, return verdict "stalled" and say why in "assessment" — that is a
+   better outcome than another round of the same thrash.
 
 4. STRENGTHEN THE CONTRACT. This is the step that matters most, and it is only possible now.
 
@@ -404,7 +409,12 @@ export async function scopeCorrections(options: ScopeCorrectionsOptions): Promis
 
 	const warnedThrash = (fileThrash ?? []).filter((t) => t.correctionIds.length >= THRASH_WARN_THRESHOLD);
 	const thrashBlock = warnedThrash.length
-		? `\nFILE THRASH WARNING (see instructions above):\n${warnedThrash.map((t) => `- ${t.file}: touched by ${t.correctionIds.length} corrections so far (${t.correctionIds.join(", ")})`).join("\n")}\n`
+		? `\nFILE THRASH WARNING (see instructions above):\n${warnedThrash
+				.map((t) => {
+					const tier = t.correctionIds.length >= THRASH_CRITICAL_THRESHOLD ? "CRITICAL" : "warning";
+					return `- [${tier}] ${t.file}: touched by ${t.correctionIds.length} corrections so far (${t.correctionIds.join(", ")})`;
+				})
+				.join("\n")}\n`
 		: "";
 
 	const userPrompt = `GOAL:

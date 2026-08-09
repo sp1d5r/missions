@@ -3,7 +3,7 @@
  * Follows the same convention as test/stall.mjs: import from dist/, hand-rolled check()/assert().
  */
 
-import { detectFileThrash, THRASH_STALL_THRESHOLD, THRASH_WARN_THRESHOLD } from "../dist/thrash.js";
+import { detectFileThrash, THRASH_CRITICAL_THRESHOLD, THRASH_WARN_THRESHOLD } from "../dist/thrash.js";
 
 let failures = 0;
 function check(name, fn) {
@@ -62,8 +62,8 @@ check("results are sorted most-touched file first", () => {
 	assert(result[1].correctionIds.length === 2, `src/hot.ts should have 2 touches`);
 });
 
-check("thresholds are ordered: warn before stall", () => {
-	assert(THRASH_WARN_THRESHOLD < THRASH_STALL_THRESHOLD, "warn threshold must be lower than the stall threshold");
+check("thresholds are ordered: warn before critical", () => {
+	assert(THRASH_WARN_THRESHOLD < THRASH_CRITICAL_THRESHOLD, "warn threshold must be lower than the critical threshold");
 });
 
 console.log(failures ? `\n${failures} FAILED` : "\nall passed");

@@ -7,7 +7,7 @@ import { allocatePortBlock, assignPorts } from "./ports.js";
 import { addWorktree, commitAll, diffAgainst, ensureBranch, filesChangedInCommit, headSha, isGitRepo } from "./git.js";
 import { blocking, checkBoundary, checkContractRatchet, checkPlan, formatViolations, warnings } from "./invariants.js";
 import { decideStallOrRetry } from "./stall.js";
-import { detectFileThrash, THRASH_STALL_THRESHOLD } from "./thrash.js";
+import { detectFileThrash } from "./thrash.js";
 import { humanBytes, reclaimWorktree } from "./lifecycle.js";
 import { type CorrectionRuling, planMission, scopeCorrections } from "./orchestrator.js";
 import { acquireMissionLock } from "./mission-lock.js";
@@ -335,22 +335,11 @@ async function runMilestoneLoop(ctx: MilestoneLoopContext): Promise<{ verdict: M
 			break;
 		}
 
+		// Feeds the orchestrator's prompt (see scopeCorrections' fileThrash option) so it can
+		// consolidate into one redesign correction instead of another single-symptom patch. Not a
+		// harness-enforced stop — maxMilestones/budget are the enforced ceiling here, same as
+		// everywhere else in this loop.
 		const fileThrash = detectFileThrash(store.state.commits, store.state.features, (sha) => filesChangedInCommit(workCwd, sha));
-		const hardThrash = fileThrash.filter((t) => t.correctionIds.length >= THRASH_STALL_THRESHOLD);
-		if (hardThrash.length) {
-			const detail = hardThrash.map((t) => `${t.file} (${t.correctionIds.length} corrections: ${t.correctionIds.join(", ")})`).join("; ");
-			const rawReason = `${hardThrash.length} file(s) have absorbed ${THRASH_STALL_THRESHOLD}+ corrections without the mission converging — narrow fixes are fighting each other: ${detail}. Needs a human to decide whether the component needs a redesign.`;
-			const fullReason = finalizeStall(store.state, rawReason, m, failing.map((a) => a.id));
-			verdict = "stalled";
-			record.verdict = verdict;
-			record.assessment = `[harness] thrash escalation: ${detail}`;
-			store.state.milestones.push(record);
-			store.save();
-			emit(`milestone ${m}: STALLED — thrash escalation — needs you: ${fullReason}`);
-			store.appendEvent("milestone_verdict", `milestone ${m}: STALLED (thrash)`, fullReason, { seat: "lead" });
-			await offerRescue(liveThisMilestone, workCwd, gitExcludes, store, emit, config.rescueWaitMs);
-			break;
-		}
 
 		emit(`milestone ${m}: ${failing.length} failing${pendingAssertions.length > 0 ? `, ${pendingAssertions.length} pending` : ""}, ${blockingBugs.length} blocking bug(s), ${openIssues.length} open issue(s) — orchestrator triaging…`);
 		const review = await scopeCorrections({
@@ -1104,51 +1093,33 @@ export async function resumeMission(
 				? store.state.features.filter((f) => (lastMilestone?.correctionIds ?? []).includes(f.id))
 				: [];
 			let resumeQueue: Feature[] = pendingFeatures.length > 0 ? pendingFeatures : correctionFeatures;
-			let thrashStalled = false;
 
 			if (resumeQueue.length === 0) {
-				// This call bypasses runMilestoneLoop, so it needs its own thrash check —
-				// the loop's check never runs if nothing gets far enough to re-enter it.
+				// Re-scope from orchestrator. fileThrash informs the prompt (see
+				// scopeCorrections' fileThrash option) — maxMilestones/budget are the ceiling.
+				emit("no pending corrections — asking orchestrator to re-scope…");
 				const fileThrash = detectFileThrash(store.state.commits, store.state.features, (sha) => filesChangedInCommit(workCwd, sha));
-				const hardThrash = fileThrash.filter((t) => t.correctionIds.length >= THRASH_STALL_THRESHOLD);
-				if (hardThrash.length) {
-					const detail = hardThrash.map((t) => `${t.file} (${t.correctionIds.length} corrections: ${t.correctionIds.join(", ")})`).join("; ");
-					thrashStalled = true;
-					emit(`no pending corrections — but ${hardThrash.length} file(s) have absorbed ${THRASH_STALL_THRESHOLD}+ corrections without converging: ${detail}`);
-					finalVerdict = "stalled";
-					finalizeStall(
-						store.state,
-						`${hardThrash.length} file(s) have absorbed ${THRASH_STALL_THRESHOLD}+ corrections without the mission converging — narrow fixes are fighting each other: ${detail}. Needs a human to decide whether the component needs a redesign.`,
-						store.state.milestones.length,
-						plan.contract.assertions.filter((a) => !a.passed).map((a) => a.id),
-					);
-				} else {
-					// Re-scope from orchestrator.
-					emit("no pending corrections — asking orchestrator to re-scope…");
-					const remaining = config.budgetUsd === undefined ? Number.POSITIVE_INFINITY : config.budgetUsd - store.state.costUsd;
-					const review = await scopeCorrections({
-						config,
-						milestone: store.state.milestones.length,
-						assertions: plan.contract.assertions,
-						scoreCard: freshScoreCard,
-						handoffs: store.state.handoffs,
-						remainingUsd: remaining,
-						milestonesLeft: maxMilestones - store.state.milestones.length,
-						fileThrash,
-					});
-					store.state.costUsd += review.costUsd;
-					if (review.assessment) emit(`  orchestrator: ${review.assessment}`);
-					if (review.corrections.length > 0) {
-						store.state.features.push(...review.corrections);
-						store.save();
-					}
-					resumeQueue = review.corrections;
+				const remaining = config.budgetUsd === undefined ? Number.POSITIVE_INFINITY : config.budgetUsd - store.state.costUsd;
+				const review = await scopeCorrections({
+					config,
+					milestone: store.state.milestones.length,
+					assertions: plan.contract.assertions,
+					scoreCard: freshScoreCard,
+					handoffs: store.state.handoffs,
+					remainingUsd: remaining,
+					milestonesLeft: maxMilestones - store.state.milestones.length,
+					fileThrash,
+				});
+				store.state.costUsd += review.costUsd;
+				if (review.assessment) emit(`  orchestrator: ${review.assessment}`);
+				if (review.corrections.length > 0) {
+					store.state.features.push(...review.corrections);
+					store.save();
 				}
+				resumeQueue = review.corrections;
 			}
 
-			if (thrashStalled) {
-				// finalVerdict/stallReason already set above — nothing left to do.
-			} else if (resumeQueue.length > 0) {
+			if (resumeQueue.length > 0) {
 				const loopResult = await runMilestoneLoop({
 					store,
 					plan,
