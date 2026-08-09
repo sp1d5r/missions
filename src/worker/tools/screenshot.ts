@@ -10,9 +10,13 @@
  *
  * Design invariants (all must hold simultaneously):
  *
- * a5  — ref leak prevention: captureSessionRefHeld is set only AFTER a
- *       successful getBrowser(); a getBrowser() rejection releases any ref
- *       acquired in the same try block via finally.
+ * a5  — ref leak prevention: captureScreenshot acquires a per-capture internal
+ *       ref via acquireBrowserRef() ONLY after a successful getBrowser() call,
+ *       and always releases it via _releaseInternalRef() in a try/finally block.
+ *       _releaseInternalRef() decrements the count but does NOT trigger
+ *       closeBrowser(), preserving browser singleton reuse for sequential
+ *       captures (a21). If getBrowser() rejects, no ref is acquired and the
+ *       finally block skips the release.
  *
  * a5  — spawn reentrance: spawnPatchCount is a counter (not a boolean).
  *       It is incremented before chromium.launch() and decremented in the
@@ -28,9 +32,13 @@
  *       the caller explicitly asks for it (e.g. in direct/test invocations),
  *       and runWorker does NOT wire opts.attachImage so there is no duplication.
  *
- * a25 — closeBrowser does NOT reset browserRefCount; it only closes the
- *       browser instance. Externally-held refs (acquireBrowserRef) survive
- *       a closeBrowser call unchanged.
+ * a25 — closeBrowser does NOT touch browserRefCount at all; it only closes
+ *       the browser instance. Externally-held refs (acquireBrowserRef) survive
+ *       a closeBrowser call unchanged. Per-capture internal refs are always
+ *       released by _releaseInternalRef() in captureScreenshot's finally block,
+ *       not inside closeBrowser(). After N acquireBrowserRef() + N
+ *       releaseBrowserRef() calls, count reaches 0 and the browser closes with
+ *       no hidden internal refs remaining.
  *
  * a28 — lazy acquisition: captureScreenshot acquires a ref only inside the
  *       try block that wraps getBrowser(). Workers that never call the
@@ -120,18 +128,18 @@ let browserChildProcess: import("child_process").ChildProcess | undefined;
 let captureInFlight = 0;
 
 /**
- * Whether the captureScreenshot() function has lazily acquired a browser ref
- * for the current browser session.
+ * Internal-only ref release: decrements browserRefCount but does NOT trigger
+ * closeBrowser(). Used by per-capture try/finally blocks so that captures that
+ * complete without external refs still leave the browser open for reuse (the
+ * browser only closes when an external releaseBrowserRef() drives count to 0,
+ * or when closeBrowser() is called explicitly).
  *
- * IMPORTANT: this flag is set to true ONLY after a successful getBrowser()
- * call. If getBrowser() rejects, this flag stays false and no ref is held.
- * The corresponding acquireBrowserRef() is performed inside the try block so
- * the finally block can always call releaseBrowserRef() safely.
- *
- * Reset to false when closeBrowser() is called so the next capture session
- * acquires a fresh ref for the new browser instance.
+ * This prevents the a21 regression where sequential captures with no external
+ * refs would close and relaunch the browser on every call.
  */
-let captureSessionRefHeld = false;
+function _releaseInternalRef(): void {
+	browserRefCount = Math.max(0, browserRefCount - 1);
+}
 
 /** Unref the browser child process so Node can exit without b.close(). */
 function unrefBrowserChildProcess(): void {
@@ -230,27 +238,18 @@ export async function releaseBrowserRef(): Promise<void> {
  * release browser resources after their last capture, allowing the Node.js
  * event loop to drain without process.exit().
  *
- * IMPORTANT: closeBrowser() does NOT modify browserRefCount for
- * externally-held refs. It only closes and nulls the browser instance and
- * resets the captureSessionRefHeld flag (decrementing the count by 1 if the
- * session ref was held). This preserves the ref counts of concurrent workers
- * that are still in-flight and did not call closeBrowser() themselves.
+ * IMPORTANT: closeBrowser() does NOT modify browserRefCount at all. It only
+ * closes and nulls the browser instance. This preserves the ref counts of
+ * concurrent workers that are still in-flight and did not call closeBrowser()
+ * themselves. Per-capture refs are managed entirely within captureScreenshot()
+ * via acquireBrowserRef() + _releaseInternalRef() in a try/finally.
  */
 export async function closeBrowser(): Promise<void> {
 	const b = browser;
 	browser = undefined;
 	browserPromise = undefined;
-	// If captureScreenshot() had lazily acquired a session ref, release it now
-	// so browserRefCount stays balanced. This is the only place the session ref
-	// is decremented (not per-capture) to allow sequential captures to reuse the
-	// browser singleton within a session.
-	if (captureSessionRefHeld) {
-		captureSessionRefHeld = false;
-		browserRefCount = Math.max(0, browserRefCount - 1);
-	}
-	// Do NOT reset browserRefCount for externally-held refs — doing so would
-	// stomp the ref count of concurrent workers that are still in-flight.
-	// closeBrowser() is a force-close (for explicit teardown), not a full reset.
+	// Do NOT touch browserRefCount — per-capture internal refs are released by
+	// _releaseInternalRef() in captureScreenshot's finally block, not here.
 	try {
 		await b?.close();
 	} catch {
@@ -566,11 +565,10 @@ async function captureScreenshot(
 	const width = params.width ?? defaultWidth;
 	const height = params.height ?? defaultHeight;
 
-	// Track whether this call is the one that acquired the session ref.
-	// This is set to true ONLY after a successful getBrowser() call below.
-	// If getBrowser() rejects, this stays false and the finally block skips
-	// releasing a ref (since none was acquired).
-	let sessionRefAcquiredThisCall = false;
+	// Track whether this call acquired an internal ref. Set to true ONLY after
+	// a successful getBrowser() call. If getBrowser() rejects, this stays false
+	// and the finally block skips releasing a ref (since none was acquired).
+	let internalRefAcquiredThisCapture = false;
 
 	// Re-ref the browser child process before starting the capture so the event
 	// loop stays alive for the duration of the async operation.
@@ -582,14 +580,12 @@ async function captureScreenshot(
 	try {
 		const b = await getBrowser();
 
-		// getBrowser() succeeded. Now acquire the session ref if not already held.
-		// This is done AFTER getBrowser() so that a failed launch does not leave
-		// a dangling ref (a5 strict discipline).
-		if (!captureSessionRefHeld) {
-			captureSessionRefHeld = true;
-			sessionRefAcquiredThisCall = true;
-			acquireBrowserRef();
-		}
+		// getBrowser() succeeded. Acquire an internal per-capture ref so this
+		// capture keeps the browser alive for its duration. This ref is released
+		// in the finally block via _releaseInternalRef() (which does NOT trigger
+		// auto-close, preserving singleton reuse for sequential captures).
+		acquireBrowserRef();
+		internalRefAcquiredThisCapture = true;
 
 		// Re-ref after getBrowser() in case the browser was just launched and
 		// browserChildProcess was set for the first time during this call.
@@ -651,12 +647,15 @@ async function captureScreenshot(
 			// ignore
 		}
 
-		// If getBrowser() threw before we acquired the session ref, undo any
-		// partially-set state. In the normal path (getBrowser succeeded),
-		// captureSessionRefHeld remains true until closeBrowser() is called.
-		// In the failure path, sessionRefAcquiredThisCall is still false so
-		// we do nothing here — no ref was acquired, no ref to release.
-		// (This comment documents the invariant; no code needed for the failure path.)
+		// Release the internal per-capture ref if one was acquired. This uses
+		// _releaseInternalRef() (not releaseBrowserRef()) so it does NOT trigger
+		// closeBrowser() when count hits 0 — preserving singleton reuse for
+		// sequential captures (a21) and letting external refs control lifetime.
+		// If getBrowser() threw before we reached acquireBrowserRef(), this flag
+		// is still false and we skip the release (no ref was acquired).
+		if (internalRefAcquiredThisCapture) {
+			_releaseInternalRef();
+		}
 
 		// Decrement the in-flight count. When it reaches 0, unref the browser
 		// child process so the Node.js event loop can drain naturally.
