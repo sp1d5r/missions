@@ -263,19 +263,14 @@ Make the change now, then emit your handoff block.`;
 	});
 	const unregister = registerWorker({ info, agent, recent });
 
-	// Increment the browser reference count before the worker starts so a
-	// sibling worker finishing concurrently does not close the browser while
-	// this one is still running.
-	acquireBrowserRef();
+	// Browser ref acquisition is now lazy: acquireBrowserRef()/releaseBrowserRef()
+	// are called inside captureScreenshot() only when the screenshot tool is actually
+	// invoked. Workers that never call the screenshot tool do not affect browser
+	// lifecycle at all — no spurious launch or close calls.
 	try {
 		await agent.prompt(task);
 	} catch (err) {
 		errorMessage = err instanceof Error ? err.message : String(err);
-	} finally {
-		// Decrement the reference count; the browser is only closed when the
-		// last concurrent worker finishes. This prevents a race where a
-		// sibling worker's closeBrowser() tears down the singleton mid-capture.
-		await releaseBrowserRef();
 	}
 	await agent.waitForIdle();
 	// NOT unregistered here. This used to drop the worker the instant its turn ended — before
