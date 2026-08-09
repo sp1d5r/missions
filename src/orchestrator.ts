@@ -198,11 +198,16 @@ Your job:
 2. RULE ON EVERY OPEN ISSUE. Each issue a worker raised must get exactly one disposition:
    - "addressed": a correction IN THIS RESPONSE fixes it. You MUST name that correction in "correctionId".
    - "deferred": nothing this mission will fix it. You MUST justify it in a checkable way, with ONE of:
-       "evidenceAssertionId": the id of an assertion that PASSED and already covers this concern, or
+       "evidenceAssertionId": the id of a DIFFERENT assertion — never the one the issue is about, even
+       if you believe its underlying logic is correct — that has ALREADY PASSED and independently
+       covers this concern, or
        "outOfScope": true, when the RFC did not ask for it.
      A note alone is not a justification. Prose is not checkable, and the harness rejects a deferral
      that cites neither. Do NOT claim validators confirmed something unless a passing assertion
      actually executed the code — the harness checks that too, and blocks the milestone if it did not.
+     Citing a failing assertion as its own evidence is exactly the self-certification this exists to
+     block, even when your reasoning about why it's failing is correct — "it fails for an unrelated
+     reason, trust me" is not evidence, a second assertion that already passed is.
    You may not leave an issue unruled, and you may not rule one "addressed" without naming the correction that
    picks it up. The harness blocks the mission on both, because an issue nobody is dispatched to fix has not
    been addressed, it has been dropped.

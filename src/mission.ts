@@ -882,6 +882,13 @@ export function isHarnessStale(daemonStartMs: number, buildMtimeMs: number): boo
 export interface ResumeMissionOpts extends ResumeOpts {
 	/** Additional USD budget to add on top of what was spent. Optional. */
 	extraBudget?: number;
+	/**
+	 * "fast": a multi-blocker or unrecognised boundary stall is scoped as a correction and
+	 * retried instead of failing closed (see stall.ts). MissionState never persists the
+	 * original run's mode, so a resume defaults to "rigorous" (fail-closed) unless asked
+	 * otherwise here — same not-persisted pattern as maxFeatures/budgetUsd above.
+	 */
+	mode?: "fast" | "rigorous";
 }
 
 /**
@@ -955,6 +962,7 @@ export async function resumeMission(
 		maxMilestones: opts.maxMilestones ?? (state!.milestones.length + 3),
 		useWorktree: false, // NEVER create a new worktree — reuse the existing one
 		target: "generic",
+		mode: opts.mode,
 	};
 
 	const maxMilestones = config.maxMilestones!;
