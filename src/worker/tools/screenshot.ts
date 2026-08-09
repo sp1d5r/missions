@@ -498,10 +498,12 @@ export function createScreenshotTool(opts: ScreenshotToolOptions = {}): AgentToo
 					);
 				}
 				params = paramsOrCtx as ScreenshotParams;
-				// Agent pipeline: DO NOT wire ctxAttachImage.
+				// Agent pipeline: suppress BOTH optsAttachImage and ctxAttachImage.
 				// The image part in the returned result is the sole delivery path;
 				// extractImageParts in worker.ts handles it on tool_execution_end.
-				ctxAttachImage = undefined;
+				// Passing undefined for both prevents opts.attachImage from firing
+				// and eliminates the duplicate-image bug (a29).
+				return captureScreenshot(params, defaultWidth, defaultHeight, undefined, undefined);
 			} else {
 				// Direct call: execute(params, ctx?)
 				params = toolCallIdOrParams;
