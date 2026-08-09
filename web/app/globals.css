@@ -536,7 +536,7 @@ textarea { resize: vertical; min-height: 76px; }
 .comments-fab .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--live); display: inline-block; }
 .comments-fab .dot.empty { background: var(--text-faint); }
 .comments-fab .count { font-variant-numeric: tabular-nums; }
-.scoping-body { font-size: 13px; line-height: 1.7; color: var(--text); max-width: 640px; }
+.scoping-body { font-size: 13px; line-height: 1.7; color: var(--text); }
 .scoping-heading {
   font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-dim);
   margin: 18px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--hairline);
